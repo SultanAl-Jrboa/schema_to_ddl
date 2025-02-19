@@ -1,4 +1,4 @@
-Schema to DDL Converter
+*Schema to DDL Converter*
 
 Overview
 The Schema to DDL Converter is a Python-based tool that automatically generates Database Definition Language (DDL) statements from an Excel schema file. This tool supports multiple databases, including MySQL, PostgreSQL, and SQL Server, making it easy to create structured database tables from predefined schema definitions.
