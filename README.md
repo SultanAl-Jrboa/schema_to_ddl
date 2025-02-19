@@ -1,15 +1,15 @@
-# **Schema to DDL Converter** #
+# **Schema to DDL Converter**
 
-Overview
-The Schema to DDL Converter is a Python-based tool that automatically generates Database Definition Language (DDL) statements from an Excel schema file. This tool supports multiple databases, including MySQL, PostgreSQL, and SQL Server, making it easy to create structured database tables from predefined schema definitions.
+## **Overview**
+The **Schema to DDL Converter** is a Python-based tool that automatically generates **Database Definition Language (DDL)** statements from an Excel schema file. This tool supports multiple databases, including **MySQL, PostgreSQL, and SQL Server**, making it easy to create structured database tables from predefined schema definitions.
 
-Features
-Automatic DDL Generation – Converts schema data from an Excel file into SQL CREATE TABLE statements.
-Multi-Database Support – Generates DDL scripts for MySQL, PostgreSQL, and SQL Server.
-Easy-to-Use – Simply provide an Excel file with table structures, and the script will generate the corresponding SQL code.
-Scalable & Customizable – Can be extended to support additional database systems.
+## **Features**
+✅ **Automatic DDL Generation** – Converts schema data from an Excel file into SQL **CREATE TABLE** statements.  
+✅ **Multi-Database Support** – Generates DDL scripts for **MySQL, PostgreSQL, and SQL Server**.  
+✅ **Easy-to-Use** – Simply provide an **Excel file** with table structures, and the script will generate the corresponding SQL code.  
+✅ **Scalable & Customizable** – Can be extended to support additional database systems.  
 
-How It Works
-1- The tool reads an Excel file (large_schema_data.xlsx) containing table names, attributes, and data types.
-2- It processes each table and its columns to construct DDL (CREATE TABLE) statements.
-3- The generated SQL scripts are saved in a .txt file for easy access and use.
+## **How It Works**
+1 - The tool reads an **Excel file (`large_schema_data.xlsx`)** containing table names, attributes, and data types.  
+2 - It processes each table and its columns to construct **DDL (`CREATE TABLE`) statements**.  
+3 - The generated **SQL scripts** are saved in a **`.txt` file** for easy access and use.  
