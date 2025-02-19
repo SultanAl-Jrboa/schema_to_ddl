@@ -15,7 +15,7 @@ The **Schema to DDL Converter** is a Python-based tool that automatically genera
 3 - The generated **SQL scripts** are saved in a **`.txt` file** for easy access and use.  
 
 
-# **schema_to_ddl/** 
+# **schema_to_ddl** 
 Main script to run the tool
 │── main.py      
 
