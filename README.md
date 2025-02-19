@@ -16,21 +16,21 @@ The **Schema to DDL Converter** is a Python-based tool that automatically genera
 
 
 # **schema_to_ddl/** 
-# Main script to run the tool
+Main script to run the tool
 │── main.py      
 
-# MySQL DDL generation logic
+MySQL DDL generation logic
 │── generate_mysql_ddl.py    
 
-# PostgreSQL DDL generation logic
+PostgreSQL DDL generation logic
 │── generate_postgresql_ddl.py 
 
-# SQL Server DDL generation logic
+SQL Server DDL generation logic
 │── generate_sqlserver_ddl.py   
 
-# Example schema file
+Example schema file
 │── large_schema_data.xlsx      
 
-# Generated DDL statements
+Generated DDL statements
 │── output_ddl.txt              
 
