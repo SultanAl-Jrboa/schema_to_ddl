@@ -59,7 +59,6 @@ The application is deployed on Render. To deploy manually:
 │── app.py               # Main Flask application
 │── templates/
 │   └── index.html       # Frontend template
-│── static/
 │── uploads/             # Directory for uploaded files
 │── outputs/             # Directory for generated DDL scripts
 │── requirements.txt     # Dependencies
