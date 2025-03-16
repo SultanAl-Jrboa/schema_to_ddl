@@ -62,7 +62,6 @@ def generate_ddl(db_type, excel_file_path):
                 referenced_column = row["Attribute"].strip()
                 foreign_keys.append((column_name, referenced_schema, referenced_table, referenced_column))
 
-            
             columns.append(column_def)
         
         table_ddl = f'CREATE TABLE {schema_name}.[{table}] (\n    ' + ",\n    ".join(columns) + "\n);"
@@ -73,11 +72,11 @@ def generate_ddl(db_type, excel_file_path):
         
         for column, ref_schema, ref_table, ref_column in foreign_keys:
             constraint_name = f'FK_{table}_{ref_table}_{column}'
-            foreign_key_sql = f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {constraint_name} FOREIGN KEY ({column}) REFERENCES {ref_schema}."{ref_table}"({ref_column});'
+            if db_type == "SQL_SERVER":
+                foreign_key_sql = f'ALTER TABLE {schema_name}.[{table}] ADD CONSTRAINT [{constraint_name}] FOREIGN KEY ({column}) REFERENCES {ref_schema}.[{ref_table}]({ref_column});'
+            else:
+                foreign_key_sql = f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {constraint_name} FOREIGN KEY ({column}) REFERENCES {ref_schema}."{ref_table}"({ref_column});'
             alter_statements.append(foreign_key_sql)
-        for statement in alter_statements:
-            print(statement)
-
     
     return "\n\n".join(ddl_statements + alter_statements)
 
