@@ -35,7 +35,6 @@ def generate_ddl(db_type, excel_file_path):
         table_df = df_metadata[df_metadata["Table Name"] == table]
         columns = []
         primary_keys = []
-        foreign_keys = []
         
         for _, row in table_df.iterrows():
             column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else row["Attribute Name"].strip()
@@ -51,13 +50,16 @@ def generate_ddl(db_type, excel_file_path):
             if str(row.get("Is it the SyncTimestamp attribute?")).strip().upper() == "YES":
                 column_def += " DEFAULT CURRENT_TIMESTAMP"
             
-            if not pd.isna(row.get("Schema")) and not pd.isna(row.get("Table")) and not pd.isna(row.get("Attribute")):
-                fk_name = f"FK_{table}_{row['Table']}"
-                foreign_key_statements.append(
-                    f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {fk_name} FOREIGN KEY ({column_name}) REFERENCES {schema_name}.\"{row['Table']}\"({row['Attribute']});"
-                )
-            
             columns.append(column_def)
+
+            # 🔥 **جلب المفاتيح الخارجية بشكل صحيح**
+            if not pd.isna(row.get("Referenced Table")) and not pd.isna(row.get("Referenced Attribute")):
+                referenced_table = row["Referenced Table"].strip()
+                referenced_column = row["Referenced Attribute"].strip()
+                fk_name = f"FK_{table}_{referenced_table}"
+                foreign_key_statements.append(
+                    f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {fk_name} FOREIGN KEY ({column_name}) REFERENCES {schema_name}.\"{referenced_table}\"({referenced_column});"
+                )
         
         table_ddl = f'CREATE TABLE {schema_name}."{table}" (\n    ' + ",\n    ".join(columns) + "\n);"
         ddl_statements.append(table_ddl)
@@ -67,6 +69,7 @@ def generate_ddl(db_type, excel_file_path):
             primary_key_statements.append(f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {pk_name} PRIMARY KEY ({', '.join(primary_keys)});")
     
     return "\n\n".join(ddl_statements + primary_key_statements + foreign_key_statements)
+
 
 app = Flask(__name__)
 
