@@ -19,20 +19,17 @@ def map_data_type(db_type, data_type):
                    "VARCHAR(255)": "VARCHAR(255)", "VARCHAR(100)": "VARCHAR(100)", "DATE": "DATE", "DATETIME": "DATETIME",
                    "DECIMAL": "DECIMAL", "MONEY": "DECIMAL(19,4)", "CHAR": "CHAR"}
     }
-    return type_mappings[db_type].get(data_type.upper(), data_type)
+    return type_mappings.get(db_type, {}).get(data_type.upper(), data_type)
 
 def generate_ddl(db_type, excel_file_path):
-    if not os.path.exists(excel_file_path):
-        raise FileNotFoundError(f"Excel file not found: {excel_file_path}")
-    
-    df_metadata = pd.read_excel(excel_file_path, sheet_name="Metadata", skiprows=4)
-    df_metadata = df_metadata.dropna(subset=["Table Name", "Attribute Name"])
-    
+    df = pd.read_excel(excel_file_path, sheet_name="Dataset Overview")
+    db_type = str(df.iloc[12, 1]).strip().upper()
+    df_metadata = pd.read_excel(excel_file_path, sheet_name="Metadata", skiprows=4).dropna(subset=["Table Name", "Attribute Name"])
     schema_name = "NIC_DWH_STG"
-    
-    ddl_statements = []
-    alter_statements = []
-    ddl_statements.append(f"-- DDL for database: {db_type}\n")
+
+    ddl_statements = [f"-- DDL for database: {db_type}\n"]
+    primary_key_statements = []
+    foreign_key_statements = []
     
     for table in df_metadata["Table Name"].unique():
         table_df = df_metadata[df_metadata["Table Name"] == table]
@@ -41,15 +38,24 @@ def generate_ddl(db_type, excel_file_path):
         foreign_keys = []
         
         for _, row in table_df.iterrows():
-            column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else f'{row["Attribute Name"].strip()}'
+            column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else row["Attribute Name"].strip()
             data_type = map_data_type(db_type, row["Data Type and Length"].strip())
             column_def = f"{column_name} {data_type}"
             
             if str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES":
                 primary_keys.append(column_name)
             
-            if row.get("Foreign Key Table") and row.get("Foreign Key Column"):
-                foreign_keys.append((column_name, row["Foreign Key Table"], row["Foreign Key Column"]))
+            if str(row.get("Is it the LastOperation attribute?")).strip().upper() == "YES":
+                column_def += f" CHECK ({column_name} IN ('INSERT', 'UPDATE', 'DELETE'))"
+            
+            if str(row.get("Is it the SyncTimestamp attribute?")).strip().upper() == "YES":
+                column_def += " DEFAULT CURRENT_TIMESTAMP"
+            
+            if not pd.isna(row.get("Schema")) and not pd.isna(row.get("Table")) and not pd.isna(row.get("Attribute")):
+                fk_name = f"FK_{table}_{row['Table']}"
+                foreign_key_statements.append(
+                    f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {fk_name} FOREIGN KEY ({column_name}) REFERENCES {schema_name}.\"{row['Table']}\"({row['Attribute']});"
+                )
             
             columns.append(column_def)
         
@@ -57,30 +63,34 @@ def generate_ddl(db_type, excel_file_path):
         ddl_statements.append(table_ddl)
         
         if primary_keys:
-            alter_statements.append(f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT PK_{table} PRIMARY KEY ({', '.join(primary_keys)});")
-        
-        for fk_col, ref_table, ref_col in foreign_keys:
-            alter_statements.append(f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT FK_{table}_{ref_table} FOREIGN KEY ({fk_col}) REFERENCES {schema_name}.\"{ref_table}\"({ref_col});")
+            pk_name = f"PK_{table}"
+            primary_key_statements.append(f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {pk_name} PRIMARY KEY ({', '.join(primary_keys)});")
     
-    return "\n\n".join(ddl_statements + alter_statements)
+    return "\n\n".join(ddl_statements + primary_key_statements + foreign_key_statements)
 
 app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    os.makedirs("uploads", exist_ok=True)
+    os.makedirs("outputs", exist_ok=True)
+    
     if request.method == 'POST':
-        file = request.files['file']
+        file = request.files.get('file')
         if file:
             file_path = os.path.join("uploads", file.filename)
             file.save(file_path)
-            ddl_output = generate_ddl("POSTGRESQL", file_path)
-            ddl_file_path = os.path.join("outputs", "ddl_output.sql")
-            with open(ddl_file_path, "w") as f:
-                f.write(ddl_output)
-            return send_file(ddl_file_path, as_attachment=True)
+            try:
+                ddl_output = generate_ddl("POSTGRESQL", file_path)
+                ddl_file_path = os.path.join("outputs", "ddl_output.sql")
+                with open(ddl_file_path, "w") as f:
+                    f.write(ddl_output)
+                return send_file(ddl_file_path, as_attachment=True)
+            except Exception as e:
+                return f"Error: {str(e)}"
+    
     return render_template('index.html')
 
 if __name__ == '__main__':
-    os.makedirs("uploads", exist_ok=True)
-    os.makedirs("outputs", exist_ok=True)
-    app.run(debug=True, host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=True)
