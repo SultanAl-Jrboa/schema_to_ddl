@@ -56,10 +56,12 @@ def generate_ddl(db_type, excel_file_path):
             if str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES":
                 primary_keys.append(column_name)
             
-            if all(pd.notna(row.get(col)) for col in ["Schema", "Table", "Attribute"]):
-                referenced_table = row["Table"]
-                referenced_column = row["Attribute"]
-                foreign_keys.append((column_name, referenced_table, referenced_column))
+            if pd.notna(row.get("Schema")) and pd.notna(row.get("Table")) and pd.notna(row.get("Attribute")):
+                referenced_schema = row["Schema"].strip()
+                referenced_table = row["Table"].strip()
+                referenced_column = row["Attribute"].strip()
+                foreign_keys.append((column_name, referenced_schema, referenced_table, referenced_column))
+
             
             columns.append(column_def)
         
@@ -69,10 +71,13 @@ def generate_ddl(db_type, excel_file_path):
         if primary_keys:
             alter_statements.append(f'ALTER TABLE {schema_name}.[{table}] ADD CONSTRAINT PK_{table} PRIMARY KEY ({", ".join(primary_keys)});')
         
-        for column, ref_table, ref_column in foreign_keys:
-            alter_statements.append(
-                f'ALTER TABLE {schema_name}.[{table}] ADD CONSTRAINT FK_{table}_{ref_table} FOREIGN KEY ({column}) REFERENCES {schema_name}.[{ref_table}]({ref_column});'
-            )
+        for column, ref_schema, ref_table, ref_column in foreign_keys:
+            constraint_name = f'FK_{table}_{ref_table}_{column}'
+            foreign_key_sql = f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {constraint_name} FOREIGN KEY ({column}) REFERENCES {ref_schema}."{ref_table}"({ref_column});'
+            alter_statements.append(foreign_key_sql)
+        for statement in alter_statements:
+            print(statement)
+
     
     return "\n\n".join(ddl_statements + alter_statements)
 
