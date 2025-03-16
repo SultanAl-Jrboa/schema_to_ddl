@@ -43,6 +43,13 @@ def generate_ddl(excel_file_path):
     
     schema_name = "NIC_DWH_STG"
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
+
+    # ✅ إنشاء المخطط إذا لم يكن موجودًا
+    if db_type in ["POSTGRESQL", "SQL_SERVER"]:
+        ddl_statements.append(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
+    elif db_type == "MYSQL":
+        ddl_statements.append(f"CREATE DATABASE IF NOT EXISTS {schema_name};\nUSE {schema_name};")
+
     alter_statements = []
     
     for table in df_metadata["Table Name"].unique():
@@ -53,14 +60,18 @@ def generate_ddl(excel_file_path):
         
         for _, row in table_df.iterrows():
             column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else row["Attribute Name"].strip()
-            data_type = map_data_type(db_type, row["Data Type and Length"].strip())
+            data_type = map_data_type(db_type, str(row["Data Type and Length"]).strip())
             column_def = f"{column_name} {data_type}"
             
             if str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES":
                 primary_keys.append(column_name)
             
-            if not pd.isna(row.get("Schema")) and not pd.isna(row.get("Table")) and not pd.isna(row.get("Attribute")):
-                foreign_keys.append((table, column_name, row['Schema'], row['Table'], row['Attribute']))
+            # ✅ التأكد من وجود القيم قبل إضافة مفتاح أجنبي
+            if pd.notna(row.get("Schema")) and pd.notna(row.get("Table")) and pd.notna(row.get("Attribute")):
+                ref_schema = row['Schema']
+                ref_table = row['Table']
+                ref_column = row['Attribute']
+                foreign_keys.append((table, column_name, ref_schema, ref_table, ref_column))
             
             columns.append(column_def)
         
