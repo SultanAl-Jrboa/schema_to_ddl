@@ -61,35 +61,40 @@ def generate_ddl(db_type, excel_file_path):
             
             columns.append(column_def)
 
-            # Check for foreign key relationships with improved handling
-            referenced_table_col = row.get("Referenced Table", None)
-            referenced_attr_col = row.get("Referenced Attribute", None)
+            # The foreign key information is at columns 10, 11, 12 (index 10, 11, 12)
+            # Check for foreign key relationships in these columns
+            ref_schema = row.get(10)  # Index 10 - Schema
+            ref_table = row.get(11)   # Index 11 - Table
+            ref_attr = row.get(12)    # Index 12 - Attribute
             
-            # Handle both NaN and empty strings
-            has_reference = (
-                referenced_table_col is not None and 
-                referenced_attr_col is not None and 
-                not pd.isna(referenced_table_col) and 
-                not pd.isna(referenced_attr_col) and
-                str(referenced_table_col).strip() != "" and 
-                str(referenced_attr_col).strip() != ""
-            )
-            
-            if has_reference:
-                referenced_table = str(referenced_table_col).strip()
-                referenced_column = str(referenced_attr_col).strip()
-                
-                # Format referenced column name for the database
-                quoted_referenced_column = f'"{referenced_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else referenced_column
-                
-                fk_name = f"FK_{table}_{column_name}"
-                foreign_key_statements.append(
-                    f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {fk_name} ' +
-                    f'FOREIGN KEY ({quoted_column_name}) REFERENCES {schema_name}."{referenced_table}"({quoted_referenced_column});'
-                )
-                
-                # Print for debugging
-                print(f"Found foreign key: {table}.{column_name} -> {referenced_table}.{referenced_column}")
+            # Handle multiple references (separated by | character)
+            if ref_table and ref_attr:
+                # Check if there are multiple references (pipe-separated)
+                if '|' in str(ref_table) and '|' in str(ref_attr):
+                    ref_tables = str(ref_table).split('|')
+                    ref_attrs = str(ref_attr).split('|')
+                    
+                    for i in range(min(len(ref_tables), len(ref_attrs))):
+                        rt = ref_tables[i].strip()
+                        ra = ref_attrs[i].strip()
+                        if rt and ra:
+                            fk_name = f"FK_{table}_{column_name}_{i+1}"
+                            foreign_key_statements.append(
+                                f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {fk_name} ' +
+                                f'FOREIGN KEY ({quoted_column_name}) REFERENCES {schema_name}."{rt}"("{ra}");'
+                            )
+                            print(f"Found foreign key: {table}.{column_name} -> {rt}.{ra}")
+                else:
+                    # Single reference
+                    rt = str(ref_table).strip()
+                    ra = str(ref_attr).strip()
+                    if rt and ra:
+                        fk_name = f"FK_{table}_{column_name}"
+                        foreign_key_statements.append(
+                            f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {fk_name} ' +
+                            f'FOREIGN KEY ({quoted_column_name}) REFERENCES {schema_name}."{rt}"("{ra}");'
+                        )
+                        print(f"Found foreign key: {table}.{column_name} -> {rt}.{ra}")
         
         table_ddl = f'CREATE TABLE {schema_name}."{table}" (\n    ' + ",\n    ".join(columns) + "\n);"
         ddl_statements.append(table_ddl)
