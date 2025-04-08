@@ -37,42 +37,69 @@ def generate_ddl(db_type, excel_file_path):
         primary_keys = []
         
         for _, row in table_df.iterrows():
-            column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else row["Attribute Name"].strip()
+            column_name = row["Attribute Name"].strip()
             data_type = map_data_type(db_type, row["Data Type and Length"].strip())
             
+            # Format column name for the database
+            quoted_column_name = f'"{column_name}"' if db_type in ["POSTGRESQL", "ORACLE"] else column_name
+            
             # Check if this column is a primary key
-            is_primary_key = str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES"
+            is_primary_key = str(row.get("Is it the Primary Key or part of the Primary Key?", "")).strip().upper() == "YES"
             
             # Add NOT NULL constraint to primary key columns
             if is_primary_key:
-                column_def = f"{column_name} {data_type} NOT NULL"
-                primary_keys.append(column_name)
+                column_def = f"{quoted_column_name} {data_type} NOT NULL"
+                primary_keys.append(quoted_column_name)
             else:
-                column_def = f"{column_name} {data_type}"
+                column_def = f"{quoted_column_name} {data_type}"
             
-            if str(row.get("Is it the LastOperation attribute?")).strip().upper() == "YES":
-                column_def += f" CHECK ({column_name} IN ('INSERT', 'UPDATE', 'DELETE'))"
+            if str(row.get("Is it the LastOperation attribute?", "")).strip().upper() == "YES":
+                column_def += f" CHECK ({quoted_column_name} IN ('INSERT', 'UPDATE', 'DELETE'))"
             
-            if str(row.get("Is it the SyncTimestamp attribute?")).strip().upper() == "YES":
+            if str(row.get("Is it the SyncTimestamp attribute?", "")).strip().upper() == "YES":
                 column_def += " DEFAULT CURRENT_TIMESTAMP"
             
             columns.append(column_def)
 
-            # Get foreign keys
-            if not pd.isna(row.get("Referenced Table")) and not pd.isna(row.get("Referenced Attribute")):
-                referenced_table = row["Referenced Table"].strip()
-                referenced_column = row["Referenced Attribute"].strip()
-                fk_name = f"FK_{table}_{referenced_table}"
+            # Check for foreign key relationships with improved handling
+            referenced_table_col = row.get("Referenced Table", None)
+            referenced_attr_col = row.get("Referenced Attribute", None)
+            
+            # Handle both NaN and empty strings
+            has_reference = (
+                referenced_table_col is not None and 
+                referenced_attr_col is not None and 
+                not pd.isna(referenced_table_col) and 
+                not pd.isna(referenced_attr_col) and
+                str(referenced_table_col).strip() != "" and 
+                str(referenced_attr_col).strip() != ""
+            )
+            
+            if has_reference:
+                referenced_table = str(referenced_table_col).strip()
+                referenced_column = str(referenced_attr_col).strip()
+                
+                # Format referenced column name for the database
+                quoted_referenced_column = f'"{referenced_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else referenced_column
+                
+                fk_name = f"FK_{table}_{column_name}"
                 foreign_key_statements.append(
-                    f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {fk_name} FOREIGN KEY ({column_name}) REFERENCES {schema_name}.\"{referenced_table}\"({referenced_column});"
+                    f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {fk_name} ' +
+                    f'FOREIGN KEY ({quoted_column_name}) REFERENCES {schema_name}."{referenced_table}"({quoted_referenced_column});'
                 )
+                
+                # Print for debugging
+                print(f"Found foreign key: {table}.{column_name} -> {referenced_table}.{referenced_column}")
         
         table_ddl = f'CREATE TABLE {schema_name}."{table}" (\n    ' + ",\n    ".join(columns) + "\n);"
         ddl_statements.append(table_ddl)
         
         if primary_keys:
             pk_name = f"PK_{table}"
-            primary_key_statements.append(f"ALTER TABLE {schema_name}.\"{table}\" ADD CONSTRAINT {pk_name} PRIMARY KEY ({', '.join(primary_keys)});")
+            primary_key_statements.append(f'ALTER TABLE {schema_name}."{table}" ADD CONSTRAINT {pk_name} PRIMARY KEY ({", ".join(primary_keys)});')
+    
+    # Print for debugging
+    print(f"Number of foreign key constraints: {len(foreign_key_statements)}")
     
     return "\n\n".join(ddl_statements + primary_key_statements + foreign_key_statements)
 
