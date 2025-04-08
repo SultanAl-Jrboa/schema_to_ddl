@@ -22,6 +22,12 @@ def map_data_type(db_type, data_type):
     }
     return type_mappings.get(db_type, {}).get(data_type.upper() if data_type else "", data_type)
 
+def normalize_name(name):
+    """Normalize table and column names to avoid typos and case sensitivity issues"""
+    if name:
+        return str(name).strip()
+    return name
+
 def generate_ddl(db_type, excel_file_path):
     # Read Excel file
     try:
@@ -59,14 +65,20 @@ def generate_ddl(db_type, excel_file_path):
     table_info = {}
     foreign_keys = []
     
+    # Keep track of all table names to normalize them
+    all_table_names = set()
+    
     # First pass: Collect table and column information
     for index, row in df_metadata.iterrows():
         # Skip rows with missing required data
         if pd.isna(row.get("Table Name")) or pd.isna(row.get("Attribute Name")):
             continue
             
-        table_name = str(row["Table Name"]).strip()
-        column_name = str(row["Attribute Name"]).strip()
+        table_name = normalize_name(row["Table Name"])
+        column_name = normalize_name(row["Attribute Name"])
+        
+        # Add to set of all table names
+        all_table_names.add(table_name)
         
         # Get data type with safe handling
         data_type = "VARCHAR2(255)"  # Default type
@@ -146,8 +158,8 @@ def generate_ddl(db_type, excel_file_path):
         if ref_table_idx is not None and ref_attr_idx is not None:
             if ref_table_idx < len(row) and ref_attr_idx < len(row):
                 if pd.notna(row.iloc[ref_table_idx]) and pd.notna(row.iloc[ref_attr_idx]):
-                    ref_table = str(row.iloc[ref_table_idx]).strip()
-                    ref_column = str(row.iloc[ref_attr_idx]).strip()
+                    ref_table = normalize_name(row.iloc[ref_table_idx])
+                    ref_column = normalize_name(row.iloc[ref_attr_idx])
                     
                     # Process references
                     if ref_table and ref_column:
@@ -157,13 +169,16 @@ def generate_ddl(db_type, excel_file_path):
                             ref_columns = ref_column.split('|')
                             
                             for i in range(min(len(ref_tables), len(ref_columns))):
-                                rt = ref_tables[i].strip()
-                                rc = ref_columns[i].strip()
+                                rt = normalize_name(ref_tables[i])
+                                rc = normalize_name(ref_columns[i])
                                 
                                 if rt and rc and rt.lower() != "nan" and rc.lower() != "nan":
                                     # Mark as foreign key and requires NOT NULL
                                     column_info['is_foreign_key'] = True
                                     column_info['not_null'] = True
+                                    
+                                    # Add table name to set
+                                    all_table_names.add(rt)
                                     
                                     foreign_keys.append({
                                         'source_table': table_name,
@@ -178,12 +193,46 @@ def generate_ddl(db_type, excel_file_path):
                                 column_info['is_foreign_key'] = True
                                 column_info['not_null'] = True
                                 
+                                # Add table name to set
+                                all_table_names.add(ref_table)
+                                
                                 foreign_keys.append({
                                     'source_table': table_name,
                                     'source_column': column_name,
                                     'target_table': ref_table,
                                     'target_column': ref_column
                                 })
+    
+    # Check for table name typos by comparing similar names
+    table_name_mapping = {}
+    for name in all_table_names:
+        # Standardize the name (ignore case, remove spaces)
+        standard_name = name.upper().replace(" ", "")
+        
+        # If standardized name exists, check which is more common
+        if standard_name in table_name_mapping:
+            # Keep the name that appears more frequently
+            existing_name = table_name_mapping[standard_name]
+            existing_count = sum(1 for t in table_info if t == existing_name)
+            new_count = sum(1 for t in table_info if t == name)
+            
+            if new_count > existing_count:
+                table_name_mapping[standard_name] = name
+        else:
+            table_name_mapping[standard_name] = name
+    
+    # Fix table name typos in foreign keys
+    for fk in foreign_keys:
+        source_std = fk['source_table'].upper().replace(" ", "")
+        target_std = fk['target_table'].upper().replace(" ", "")
+        
+        if source_std in table_name_mapping and fk['source_table'] != table_name_mapping[source_std]:
+            print(f"Correcting table name: {fk['source_table']} -> {table_name_mapping[source_std]}")
+            fk['source_table'] = table_name_mapping[source_std]
+            
+        if target_std in table_name_mapping and fk['target_table'] != table_name_mapping[target_std]:
+            print(f"Correcting table name: {fk['target_table']} -> {table_name_mapping[target_std]}")
+            fk['target_table'] = table_name_mapping[target_std]
     
     # Create a directed graph for cycle detection
     graph = nx.DiGraph()
@@ -197,6 +246,7 @@ def generate_ddl(db_type, excel_file_path):
     # Detect cycles
     try:
         cycles = list(nx.simple_cycles(graph))
+        print(f"Detected cycles: {cycles}")
     except nx.NetworkXNoCycle:
         cycles = []
     except Exception as e:
@@ -254,6 +304,8 @@ def generate_ddl(db_type, excel_file_path):
     
     # Generate UNIQUE constraints for non-PK referenced columns
     unique_statements = []
+    unique_constraints = set()  # Track constraints to avoid duplicates
+    
     for target_table, target_column in referenced_columns:
         # Skip if the table isn't in our processed tables
         if target_table not in table_info:
@@ -268,12 +320,20 @@ def generate_ddl(db_type, excel_file_path):
         
         if not is_pk:
             quoted_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
+            
+            # Create a unique constraint name and check for duplicates
             uq_name = f"UQ_{target_table}_{target_column}"
+            if uq_name in unique_constraints:
+                continue
+                
+            unique_constraints.add(uq_name)
             uq_stmt = f'ALTER TABLE {schema_name}."{target_table}" ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
             unique_statements.append(uq_stmt)
     
     # Generate FOREIGN KEY constraints
     fk_statements = []
+    fk_constraints = set()  # Track constraint names to avoid duplicates
+    
     for fk in foreign_keys:
         source_table = fk['source_table']
         source_column = fk['source_column']
@@ -282,12 +342,29 @@ def generate_ddl(db_type, excel_file_path):
         
         # Skip foreign keys that would create cycles
         if (source_table, target_table) in removed_edges:
+            print(f"Skipping foreign key {source_table}.{source_column} -> {target_table}.{target_column} to avoid cycles")
+            continue
+        
+        # Skip if target table doesn't exist in our schema
+        if target_table not in table_info:
+            print(f"Skipping foreign key to non-existent table: {target_table}")
             continue
         
         quoted_source_column = f'"{source_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else source_column
         quoted_target_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
         
-        fk_name = f"FK_{source_table}_{source_column}"
+        # Create a unique constraint name
+        fk_name = f"FK_{source_table}_{source_column}_TO_{target_table}"
+        
+        # Make sure we don't have duplicate constraint names
+        base_fk_name = fk_name
+        counter = 1
+        while fk_name in fk_constraints:
+            fk_name = f"{base_fk_name}_{counter}"
+            counter += 1
+            
+        fk_constraints.add(fk_name)
+        
         fk_stmt = f'ALTER TABLE {schema_name}."{source_table}" ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}."{target_table}"({quoted_target_column});'
         fk_statements.append(fk_stmt)
     
@@ -320,7 +397,8 @@ def index():
             file_path = os.path.join("uploads", file.filename)
             file.save(file_path)
             try:
-                ddl_output = generate_ddl("POSTGRESQL", file_path)
+                db_type = request.form.get('db_type', 'POSTGRESQL')
+                ddl_output = generate_ddl(db_type, file_path)
                 ddl_file_path = os.path.join("outputs", "ddl_output.sql")
                 with open(ddl_file_path, "w") as f:
                     f.write(ddl_output)
