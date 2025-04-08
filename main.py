@@ -39,10 +39,16 @@ def generate_ddl(db_type, excel_file_path):
         for _, row in table_df.iterrows():
             column_name = f'"{row["Attribute Name"].strip()}"' if db_type in ["POSTGRESQL", "ORACLE"] else row["Attribute Name"].strip()
             data_type = map_data_type(db_type, row["Data Type and Length"].strip())
-            column_def = f"{column_name} {data_type}"
             
-            if str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES":
+            # Check if this column is a primary key
+            is_primary_key = str(row.get("Is it the Primary Key or part of the Primary Key?")).strip().upper() == "YES"
+            
+            # Add NOT NULL constraint to primary key columns
+            if is_primary_key:
+                column_def = f"{column_name} {data_type} NOT NULL"
                 primary_keys.append(column_name)
+            else:
+                column_def = f"{column_name} {data_type}"
             
             if str(row.get("Is it the LastOperation attribute?")).strip().upper() == "YES":
                 column_def += f" CHECK ({column_name} IN ('INSERT', 'UPDATE', 'DELETE'))"
@@ -52,7 +58,7 @@ def generate_ddl(db_type, excel_file_path):
             
             columns.append(column_def)
 
-            # 🔥 **جلب المفاتيح الخارجية بشكل صحيح**
+            # Get foreign keys
             if not pd.isna(row.get("Referenced Table")) and not pd.isna(row.get("Referenced Attribute")):
                 referenced_table = row["Referenced Table"].strip()
                 referenced_column = row["Referenced Attribute"].strip()
