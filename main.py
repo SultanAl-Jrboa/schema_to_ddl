@@ -33,7 +33,7 @@ def generate_ddl(db_type, excel_file_path):
         print("Available columns in Metadata sheet:", df_metadata.columns.tolist())
         
         # Make sure required columns exist
-        required_columns = ["Table Name", "Attribute Name", "Data Type and Length"]
+        required_columns = ["Table Name", "Attribute Name"]
         for col in required_columns:
             if col not in df_metadata.columns:
                 raise Exception(f"Required column '{col}' is missing from Excel file")
@@ -55,9 +55,8 @@ def generate_ddl(db_type, excel_file_path):
     elif db_type == "MYSQL":
         ddl_statements.append(f"-- Create schema if it doesn't exist\n-- Uncomment this if the schema doesn't already exist in your database\n-- CREATE DATABASE IF NOT EXISTS {schema_name};\n-- USE {schema_name};\n")
     
-    # Create dictionaries to store table information
-    table_columns = {}
-    primary_keys = {}
+    # Track column information separately to avoid string comparison issues
+    table_info = {}
     foreign_keys = []
     
     # First pass: Collect table and column information
@@ -95,93 +94,96 @@ def generate_ddl(db_type, excel_file_path):
         if "Is it the SyncTimestamp attribute?" in row and pd.notna(row["Is it the SyncTimestamp attribute?"]):
             is_timestamp = str(row["Is it the SyncTimestamp attribute?"]).strip().upper() == "YES"
         
-        # Prepare column definition
-        column_def = quoted_column_name + " " + mapped_data_type
+        # Initialize table info if needed
+        if table_name not in table_info:
+            table_info[table_name] = {
+                'columns': [],
+                'primary_keys': []
+            }
         
-        # Add constraints
+        # Store column information in structured format
+        column_info = {
+            'name': column_name,
+            'quoted_name': quoted_column_name,
+            'data_type': mapped_data_type,
+            'is_primary_key': is_primary_key,
+            'is_last_operation': is_last_operation,
+            'is_timestamp': is_timestamp,
+            'is_foreign_key': False,
+            'not_null': is_primary_key
+        }
+        
         if is_primary_key:
-            column_def += " NOT NULL"
-            if table_name not in primary_keys:
-                primary_keys[table_name] = []
-            primary_keys[table_name].append(quoted_column_name)
+            table_info[table_name]['primary_keys'].append(quoted_column_name)
         
-        if is_last_operation:
-            column_def += f" CHECK ({quoted_column_name} IN ('INSERT', 'UPDATE', 'DELETE'))"
-        
-        if is_timestamp:
-            column_def += " DEFAULT CURRENT_TIMESTAMP"
-        
-        # Add column to table
-        if table_name not in table_columns:
-            table_columns[table_name] = []
-        table_columns[table_name].append(column_def)
+        table_info[table_name]['columns'].append(column_info)
         
         # Check for foreign key relationships
-        # Look for indices 10, 11, 12 but handle the case where they might not exist
-        ref_table = None
-        ref_column = None
-        
-        # Find which columns contain reference information (look for Schema, Table, Attribute headers)
-        ref_schema_idx = None
+        # Find which columns contain reference information
         ref_table_idx = None
         ref_attr_idx = None
         
         # First, try to find by header text
         for col_idx, col_name in enumerate(df_metadata.columns):
-            if "Referenced Table" in str(col_name) or "Table" in str(col_name) and "Fill" in str(df_metadata.iloc[0, col_idx]):
+            col_name_str = str(col_name).lower()
+            if "reference" in col_name_str and "table" in col_name_str:
                 ref_table_idx = col_idx
-            if "Referenced Attribute" in str(col_name) or "Attribute" in str(col_name) and "Fill" in str(df_metadata.iloc[0, col_idx]):
+            if "reference" in col_name_str and "attribute" in col_name_str:
                 ref_attr_idx = col_idx
-                
-        # If not found, try fixed positions 10-12
-        if ref_table_idx is None and len(row) > 11:
-            ref_table_idx = 11
-        if ref_attr_idx is None and len(row) > 12:
-            ref_attr_idx = 12
         
-        # Get reference information
+        # If not found by header, try to access by position 10-12
+        if ref_table_idx is None and len(row) > 11:
+            # Check if the column at index 11 has any value
+            if pd.notna(row.iloc[11]):
+                ref_table_idx = 11
+        
+        if ref_attr_idx is None and len(row) > 12:
+            # Check if the column at index 12 has any value
+            if pd.notna(row.iloc[12]):
+                ref_attr_idx = 12
+        
+        # Get reference information if available
         if ref_table_idx is not None and ref_attr_idx is not None:
             if ref_table_idx < len(row) and ref_attr_idx < len(row):
                 if pd.notna(row.iloc[ref_table_idx]) and pd.notna(row.iloc[ref_attr_idx]):
                     ref_table = str(row.iloc[ref_table_idx]).strip()
                     ref_column = str(row.iloc[ref_attr_idx]).strip()
-        
-        # Handle multiple references (pipe-separated)
-        if ref_table and ref_column:
-            if '|' in ref_table and '|' in ref_column:
-                ref_tables = ref_table.split('|')
-                ref_columns = ref_column.split('|')
-                
-                for i in range(min(len(ref_tables), len(ref_columns))):
-                    rt = ref_tables[i].strip()
-                    rc = ref_columns[i].strip()
                     
-                    if rt and rc and rt.lower() != "nan" and rc.lower() != "nan":
-                        # Add NOT NULL constraint if it's a foreign key
-                        if " NOT NULL" not in column_def:
-                            idx = table_columns[table_name].index(column_def)
-                            table_columns[table_name][idx] = column_def + " NOT NULL"
-                        
-                        foreign_keys.append({
-                            'source_table': table_name,
-                            'source_column': column_name,
-                            'target_table': rt,
-                            'target_column': rc
-                        })
-            else:
-                # Single reference
-                if ref_table.lower() != "nan" and ref_column.lower() != "nan":
-                    # Add NOT NULL constraint if it's a foreign key
-                    if " NOT NULL" not in column_def:
-                        idx = table_columns[table_name].index(column_def)
-                        table_columns[table_name][idx] = column_def + " NOT NULL"
-                    
-                    foreign_keys.append({
-                        'source_table': table_name,
-                        'source_column': column_name,
-                        'target_table': ref_table,
-                        'target_column': ref_column
-                    })
+                    # Process references
+                    if ref_table and ref_column:
+                        # Handle multiple references (pipe-separated)
+                        if '|' in ref_table and '|' in ref_column:
+                            ref_tables = ref_table.split('|')
+                            ref_columns = ref_column.split('|')
+                            
+                            for i in range(min(len(ref_tables), len(ref_columns))):
+                                rt = ref_tables[i].strip()
+                                rc = ref_columns[i].strip()
+                                
+                                if rt and rc and rt.lower() != "nan" and rc.lower() != "nan":
+                                    # Mark as foreign key and requires NOT NULL
+                                    column_info['is_foreign_key'] = True
+                                    column_info['not_null'] = True
+                                    
+                                    foreign_keys.append({
+                                        'source_table': table_name,
+                                        'source_column': column_name,
+                                        'target_table': rt,
+                                        'target_column': rc
+                                    })
+                        else:
+                            # Single reference
+                            if ref_table.lower() != "nan" and ref_column.lower() != "nan":
+                                # Mark as foreign key and requires NOT NULL
+                                column_info['is_foreign_key'] = True
+                                column_info['not_null'] = True
+                                
+                                foreign_keys.append({
+                                    'source_table': table_name,
+                                    'source_column': column_name,
+                                    'target_table': ref_table,
+                                    'target_column': ref_column
+                                })
     
     # Create a directed graph for cycle detection
     graph = nx.DiGraph()
@@ -214,16 +216,35 @@ def generate_ddl(db_type, excel_file_path):
     
     # Generate CREATE TABLE statements
     table_ddl_statements = []
-    for table_name, columns in table_columns.items():
-        table_ddl = f'CREATE TABLE {schema_name}."{table_name}" (\n    ' + ",\n    ".join(columns) + "\n);"
+    
+    for table_name, info in table_info.items():
+        column_defs = []
+        
+        for col in info['columns']:
+            # Build column definition with constraints
+            col_def = f"{col['quoted_name']} {col['data_type']}"
+            
+            if col['not_null']:
+                col_def += " NOT NULL"
+                
+            if col['is_last_operation']:
+                col_def += f" CHECK ({col['quoted_name']} IN ('INSERT', 'UPDATE', 'DELETE'))"
+                
+            if col['is_timestamp']:
+                col_def += " DEFAULT CURRENT_TIMESTAMP"
+                
+            column_defs.append(col_def)
+        
+        # Create table DDL
+        table_ddl = f'CREATE TABLE {schema_name}."{table_name}" (\n    ' + ",\n    ".join(column_defs) + "\n);"
         table_ddl_statements.append(table_ddl)
     
     # Generate PRIMARY KEY constraints
     pk_statements = []
-    for table_name, columns in primary_keys.items():
-        if columns:
+    for table_name, info in table_info.items():
+        if info['primary_keys']:
             pk_name = f"PK_{table_name}"
-            pk_stmt = f'ALTER TABLE {schema_name}."{table_name}" ADD CONSTRAINT {pk_name} PRIMARY KEY ({", ".join(columns)});'
+            pk_stmt = f'ALTER TABLE {schema_name}."{table_name}" ADD CONSTRAINT {pk_name} PRIMARY KEY ({", ".join(info["primary_keys"])});'
             pk_statements.append(pk_stmt)
     
     # Collect columns referenced by foreign keys that aren't primary keys
@@ -234,12 +255,16 @@ def generate_ddl(db_type, excel_file_path):
     # Generate UNIQUE constraints for non-PK referenced columns
     unique_statements = []
     for target_table, target_column in referenced_columns:
+        # Skip if the table isn't in our processed tables
+        if target_table not in table_info:
+            continue
+            
         # Check if it's already a primary key
         is_pk = False
-        if target_table in primary_keys:
-            quoted_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
-            if quoted_column in primary_keys[target_table]:
+        for col in table_info[target_table]['columns']:
+            if col['name'] == target_column and col['is_primary_key']:
                 is_pk = True
+                break
         
         if not is_pk:
             quoted_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
