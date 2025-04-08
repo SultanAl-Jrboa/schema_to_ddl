@@ -28,7 +28,16 @@ def generate_ddl(db_type, excel_file_path):
         df = pd.read_excel(excel_file_path, sheet_name="Dataset Overview")
         db_type = str(df.iloc[12, 1]).strip().upper() if df.shape[0] > 12 and df.shape[1] > 1 else db_type
         
+        # Print column names to debug
         df_metadata = pd.read_excel(excel_file_path, sheet_name="Metadata", skiprows=4)
+        print("Available columns in Metadata sheet:", df_metadata.columns.tolist())
+        
+        # Make sure required columns exist
+        required_columns = ["Table Name", "Attribute Name", "Data Type and Length"]
+        for col in required_columns:
+            if col not in df_metadata.columns:
+                raise Exception(f"Required column '{col}' is missing from Excel file")
+        
         df_metadata = df_metadata.dropna(subset=["Table Name", "Attribute Name"])
         schema_name = "NIC_DWH_STG"
     except Exception as e:
@@ -52,10 +61,18 @@ def generate_ddl(db_type, excel_file_path):
     foreign_keys = []
     
     # First pass: Collect table and column information
-    for _, row in df_metadata.iterrows():
-        table_name = row["Table Name"].strip()
-        column_name = row["Attribute Name"].strip()
-        data_type = row["Data Type and Length"].strip() if pd.notna(row.get("Data Type and Length")) else "VARCHAR2(255)"
+    for index, row in df_metadata.iterrows():
+        # Skip rows with missing required data
+        if pd.isna(row.get("Table Name")) or pd.isna(row.get("Attribute Name")):
+            continue
+            
+        table_name = str(row["Table Name"]).strip()
+        column_name = str(row["Attribute Name"]).strip()
+        
+        # Get data type with safe handling
+        data_type = "VARCHAR2(255)"  # Default type
+        if "Data Type and Length" in row and pd.notna(row["Data Type and Length"]):
+            data_type = str(row["Data Type and Length"]).strip()
         
         # Map data type according to target database
         mapped_data_type = map_data_type(db_type, data_type)
@@ -65,17 +82,17 @@ def generate_ddl(db_type, excel_file_path):
         
         # Check if this column is a primary key
         is_primary_key = False
-        if pd.notna(row.get("Is it the Primary Key or part of the Primary Key?")):
+        if "Is it the Primary Key or part of the Primary Key?" in row and pd.notna(row["Is it the Primary Key or part of the Primary Key?"]):
             is_primary_key = str(row["Is it the Primary Key or part of the Primary Key?"]).strip().upper() == "YES"
         
         # Check if this column is LastOperation
         is_last_operation = False
-        if pd.notna(row.get("Is it the LastOperation attribute?")):
+        if "Is it the LastOperation attribute?" in row and pd.notna(row["Is it the LastOperation attribute?"]):
             is_last_operation = str(row["Is it the LastOperation attribute?"]).strip().upper() == "YES"
         
         # Check if this column is Timestamp
         is_timestamp = False
-        if pd.notna(row.get("Is it the SyncTimestamp attribute?")):
+        if "Is it the SyncTimestamp attribute?" in row and pd.notna(row["Is it the SyncTimestamp attribute?"]):
             is_timestamp = str(row["Is it the SyncTimestamp attribute?"]).strip().upper() == "YES"
         
         # Prepare column definition
@@ -100,16 +117,34 @@ def generate_ddl(db_type, excel_file_path):
         table_columns[table_name].append(column_def)
         
         # Check for foreign key relationships
+        # Look for indices 10, 11, 12 but handle the case where they might not exist
         ref_table = None
         ref_column = None
         
-        # Look for reference information in column 10, 11, 12
-        for idx in range(10, 13):
-            if idx < len(row) and pd.notna(row.iloc[idx]):
-                if idx == 11:  # Table column
-                    ref_table = str(row.iloc[idx]).strip()
-                elif idx == 12:  # Attribute column
-                    ref_column = str(row.iloc[idx]).strip()
+        # Find which columns contain reference information (look for Schema, Table, Attribute headers)
+        ref_schema_idx = None
+        ref_table_idx = None
+        ref_attr_idx = None
+        
+        # First, try to find by header text
+        for col_idx, col_name in enumerate(df_metadata.columns):
+            if "Referenced Table" in str(col_name) or "Table" in str(col_name) and "Fill" in str(df_metadata.iloc[0, col_idx]):
+                ref_table_idx = col_idx
+            if "Referenced Attribute" in str(col_name) or "Attribute" in str(col_name) and "Fill" in str(df_metadata.iloc[0, col_idx]):
+                ref_attr_idx = col_idx
+                
+        # If not found, try fixed positions 10-12
+        if ref_table_idx is None and len(row) > 11:
+            ref_table_idx = 11
+        if ref_attr_idx is None and len(row) > 12:
+            ref_attr_idx = 12
+        
+        # Get reference information
+        if ref_table_idx is not None and ref_attr_idx is not None:
+            if ref_table_idx < len(row) and ref_attr_idx < len(row):
+                if pd.notna(row.iloc[ref_table_idx]) and pd.notna(row.iloc[ref_attr_idx]):
+                    ref_table = str(row.iloc[ref_table_idx]).strip()
+                    ref_column = str(row.iloc[ref_attr_idx]).strip()
         
         # Handle multiple references (pipe-separated)
         if ref_table and ref_column:
@@ -121,7 +156,7 @@ def generate_ddl(db_type, excel_file_path):
                     rt = ref_tables[i].strip()
                     rc = ref_columns[i].strip()
                     
-                    if rt and rc and rt != "nan" and rc != "nan":
+                    if rt and rc and rt.lower() != "nan" and rc.lower() != "nan":
                         # Add NOT NULL constraint if it's a foreign key
                         if " NOT NULL" not in column_def:
                             idx = table_columns[table_name].index(column_def)
@@ -135,7 +170,7 @@ def generate_ddl(db_type, excel_file_path):
                         })
             else:
                 # Single reference
-                if ref_table != "nan" and ref_column != "nan":
+                if ref_table.lower() != "nan" and ref_column.lower() != "nan":
                     # Add NOT NULL constraint if it's a foreign key
                     if " NOT NULL" not in column_def:
                         idx = table_columns[table_name].index(column_def)
@@ -161,6 +196,9 @@ def generate_ddl(db_type, excel_file_path):
     try:
         cycles = list(nx.simple_cycles(graph))
     except nx.NetworkXNoCycle:
+        cycles = []
+    except Exception as e:
+        print(f"Warning: Error detecting cycles: {str(e)}")
         cycles = []
     
     # Remove edges to break cycles
