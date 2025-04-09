@@ -4,26 +4,145 @@ import os
 import networkx as nx
 
 def map_data_type(db_type, data_type):
+    """
+    Maps generic data types to database-specific data types
+    """
     type_mappings = {
-        "SQL_SERVER": {"varchar": "VARCHAR(255)", "nvarchar": "NVARCHAR(255)", "char": "CHAR(10)", "text": "TEXT",
-                        "int": "INT", "bigint": "BIGINT", "smallint": "SMALLINT", "tinyint": "TINYINT", "bit": "BIT",
-                        "decimal": "DECIMAL(18,2)", "numeric": "NUMERIC(18,2)", "float": "FLOAT", "real": "REAL",
-                        "datetime": "DATETIME", "date": "DATE", "time": "TIME", "timestamp": "TIMESTAMP",
-                        "binary": "BINARY", "varbinary": "VARBINARY(MAX)"},
-        "POSTGRESQL": {"BOOLEAN": "BOOLEAN", "TEXT": "TEXT", "FLOAT": "REAL", "INT": "INTEGER", "BIGINT": "BIGINT",
-                        "VARCHAR(255)": "VARCHAR(255)", "VARCHAR(100)": "VARCHAR(100)", "DATE": "DATE", "DATETIME": "TIMESTAMP",
-                        "DECIMAL": "NUMERIC", "MONEY": "NUMERIC(19,4)", "CHAR": "CHAR"},
-        "ORACLE": {"BOOLEAN": "NUMBER(1)", "TEXT": "CLOB", "FLOAT": "NUMBER", "INT": "NUMBER(10)", "BIGINT": "NUMBER(19)",
-                    "VARCHAR(255)": "VARCHAR2(255)", "VARCHAR(100)": "VARCHAR2(100)", "DATE": "DATE", "DATETIME": "TIMESTAMP",
-                    "DECIMAL": "NUMBER", "MONEY": "NUMBER(19,4)", "CHAR": "CHAR"},
-        "MYSQL": {"BOOLEAN": "TINYINT(1)", "TEXT": "TEXT", "FLOAT": "FLOAT", "INT": "INT", "BIGINT": "BIGINT",
-                   "VARCHAR(255)": "VARCHAR(255)", "VARCHAR(100)": "VARCHAR(100)", "DATE": "DATE", "DATETIME": "DATETIME",
-                   "DECIMAL": "DECIMAL", "MONEY": "DECIMAL(19,4)", "CHAR": "CHAR"}
+        "SQL_SERVER": {
+            "varchar": "VARCHAR(255)", 
+            "nvarchar": "NVARCHAR(255)", 
+            "char": "CHAR(10)", 
+            "text": "TEXT",
+            "int": "INT", 
+            "bigint": "BIGINT", 
+            "smallint": "SMALLINT", 
+            "tinyint": "TINYINT", 
+            "bit": "BIT",
+            "decimal": "DECIMAL(18,2)", 
+            "numeric": "NUMERIC(18,2)", 
+            "float": "FLOAT", 
+            "real": "REAL",
+            "datetime": "DATETIME2", 
+            "date": "DATE", 
+            "time": "TIME", 
+            "timestamp": "DATETIME2",
+            "binary": "BINARY", 
+            "varbinary": "VARBINARY(MAX)",
+            "boolean": "BIT",
+            "money": "MONEY"
+        },
+        "POSTGRESQL": {
+            "varchar": "VARCHAR(255)", 
+            "nvarchar": "VARCHAR(255)", 
+            "char": "CHAR(10)", 
+            "text": "TEXT",
+            "int": "INTEGER", 
+            "bigint": "BIGINT", 
+            "smallint": "SMALLINT", 
+            "tinyint": "SMALLINT", 
+            "bit": "BIT(1)",
+            "decimal": "NUMERIC(18,2)", 
+            "numeric": "NUMERIC(18,2)", 
+            "float": "REAL", 
+            "real": "REAL",
+            "datetime": "TIMESTAMP", 
+            "date": "DATE", 
+            "time": "TIME", 
+            "timestamp": "TIMESTAMP",
+            "binary": "BYTEA", 
+            "varbinary": "BYTEA",
+            "boolean": "BOOLEAN",
+            "money": "MONEY"
+        },
+        "ORACLE": {
+            "varchar": "VARCHAR2(255)", 
+            "nvarchar": "NVARCHAR2(255)", 
+            "char": "CHAR(10)", 
+            "text": "CLOB",
+            "int": "NUMBER(10)", 
+            "bigint": "NUMBER(19)", 
+            "smallint": "NUMBER(5)", 
+            "tinyint": "NUMBER(3)", 
+            "bit": "NUMBER(1)",
+            "decimal": "NUMBER(18,2)", 
+            "numeric": "NUMBER(18,2)", 
+            "float": "FLOAT", 
+            "real": "FLOAT",
+            "datetime": "TIMESTAMP", 
+            "date": "DATE", 
+            "time": "DATE", 
+            "timestamp": "TIMESTAMP",
+            "binary": "BLOB", 
+            "varbinary": "BLOB",
+            "boolean": "NUMBER(1)",
+            "money": "NUMBER(19,4)"
+        },
+        "MYSQL": {
+            "varchar": "VARCHAR(255)", 
+            "nvarchar": "VARCHAR(255) CHARACTER SET utf8mb4", 
+            "char": "CHAR(10)", 
+            "text": "TEXT",
+            "int": "INT", 
+            "bigint": "BIGINT", 
+            "smallint": "SMALLINT", 
+            "tinyint": "TINYINT", 
+            "bit": "BIT(1)",
+            "decimal": "DECIMAL(18,2)", 
+            "numeric": "DECIMAL(18,2)", 
+            "float": "FLOAT", 
+            "real": "FLOAT",
+            "datetime": "DATETIME", 
+            "date": "DATE", 
+            "time": "TIME", 
+            "timestamp": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "binary": "BINARY", 
+            "varbinary": "VARBINARY(255)",
+            "boolean": "TINYINT(1)",
+            "money": "DECIMAL(19,4)"
+        }
     }
-    return type_mappings.get(db_type, {}).get(data_type.upper() if data_type else "", data_type)
+    
+    # Try to get the mapped type, use original if not found
+    if data_type is None:
+        return "VARCHAR(255)"
+        
+    data_type = str(data_type).strip().upper()
+    return type_mappings.get(db_type, {}).get(data_type, data_type)
+
+def get_identifier_quote(db_type):
+    """
+    Returns the appropriate identifier quote character(s) for each database type
+    """
+    if db_type == "MYSQL":
+        return "`"
+    elif db_type == "SQL_SERVER" or db_type == "POSTGRESQL" or db_type == "ORACLE":
+        return "\""
+    else:
+        return "\""
+
+def format_enum_type(db_type, values):
+    """
+    Format ENUM type for different databases
+    """
+    if db_type == "MYSQL":
+        # MySQL uses ENUM('val1', 'val2')
+        return f"ENUM({', '.join([f\"'{val}'\" for val in values])})"
+    elif db_type == "POSTGRESQL":
+        # PostgreSQL uses custom types, but we'll use CHECK constraints instead for simplicity
+        return f"VARCHAR(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
+    elif db_type == "ORACLE":
+        # Oracle uses CHECK constraints
+        return f"VARCHAR2(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
+    elif db_type == "SQL_SERVER":
+        # SQL Server uses CHECK constraints
+        return f"VARCHAR(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
+    else:
+        return f"VARCHAR(10)"
 
 def normalize_name(name):
-    """Normalize table and column names to avoid typos and case sensitivity issues"""
+    """
+    Normalize table and column names to avoid typos and case sensitivity issues
+    """
     if name:
         return str(name).strip()
     return name
@@ -32,9 +151,13 @@ def generate_ddl(db_type, excel_file_path):
     # Read Excel file
     try:
         df = pd.read_excel(excel_file_path, sheet_name="Dataset Overview")
-        db_type = str(df.iloc[12, 1]).strip().upper() if df.shape[0] > 12 and df.shape[1] > 1 else db_type
+        # If database type is specified in the Excel file, use it
+        if df.shape[0] > 12 and df.shape[1] > 1:
+            specified_db_type = str(df.iloc[12, 1]).strip().upper()
+            if specified_db_type in ["MYSQL", "ORACLE", "SQL_SERVER", "POSTGRESQL"]:
+                db_type = specified_db_type
         
-        # Print column names to debug
+        # Print column names for debugging
         df_metadata = pd.read_excel(excel_file_path, sheet_name="Metadata", skiprows=4)
         print("Available columns in Metadata sheet:", df_metadata.columns.tolist())
         
@@ -48,6 +171,9 @@ def generate_ddl(db_type, excel_file_path):
         schema_name = "NIC_DWH_STG"
     except Exception as e:
         raise Exception(f"Error reading Excel file: {str(e)}")
+    
+    # Get the appropriate quote character for identifiers
+    quote_char = get_identifier_quote(db_type)
     
     # Add schema creation statement
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
@@ -81,7 +207,8 @@ def generate_ddl(db_type, excel_file_path):
         all_table_names.add(table_name)
         
         # Get data type with safe handling
-        data_type = "VARCHAR2(255)"  # Default type
+        default_type = "VARCHAR(255)" if db_type != "ORACLE" else "VARCHAR2(255)"
+        data_type = default_type  
         if "Data Type and Length" in row and pd.notna(row["Data Type and Length"]):
             data_type = str(row["Data Type and Length"]).strip()
         
@@ -89,7 +216,7 @@ def generate_ddl(db_type, excel_file_path):
         mapped_data_type = map_data_type(db_type, data_type)
         
         # Format column name for the database
-        quoted_column_name = f'"{column_name}"' if db_type in ["POSTGRESQL", "ORACLE"] else column_name
+        quoted_column_name = f'{quote_char}{column_name}{quote_char}'
         
         # Check if this column is a primary key
         is_primary_key = False
@@ -278,15 +405,30 @@ def generate_ddl(db_type, excel_file_path):
                 col_def += " NOT NULL"
                 
             if col['is_last_operation']:
-                col_def += f" CHECK ({col['quoted_name']} IN ('INSERT', 'UPDATE', 'DELETE'))"
+                if db_type == "MYSQL":
+                    # For MySQL, use ENUM type for LastOperation
+                    col_def = f"{col['quoted_name']} ENUM('INSERT', 'UPDATE', 'DELETE')"
+                else:
+                    # For other databases, use CHECK constraints
+                    col_def += f" CHECK ({col['quoted_name']} IN ('INSERT', 'UPDATE', 'DELETE'))"
                 
             if col['is_timestamp']:
-                col_def += " DEFAULT CURRENT_TIMESTAMP"
+                if db_type == "MYSQL":
+                    col_def += " DEFAULT CURRENT_TIMESTAMP"
+                elif db_type == "POSTGRESQL":
+                    col_def += " DEFAULT CURRENT_TIMESTAMP"
+                elif db_type == "ORACLE":
+                    col_def += " DEFAULT CURRENT_TIMESTAMP"
+                elif db_type == "SQL_SERVER":
+                    col_def += " DEFAULT CURRENT_TIMESTAMP"
                 
             column_defs.append(col_def)
         
         # Create table DDL
-        table_ddl = f'CREATE TABLE {schema_name}."{table_name}" (\n    ' + ",\n    ".join(column_defs) + "\n);"
+        if db_type == "MYSQL":
+            table_ddl = f'CREATE TABLE {schema_name}.{quote_char}{table_name}{quote_char} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+        else:
+            table_ddl = f'CREATE TABLE {schema_name}.{quote_char}{table_name}{quote_char} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         table_ddl_statements.append(table_ddl)
     
     # Generate PRIMARY KEY constraints
@@ -294,7 +436,13 @@ def generate_ddl(db_type, excel_file_path):
     for table_name, info in table_info.items():
         if info['primary_keys']:
             pk_name = f"PK_{table_name}"
-            pk_stmt = f'ALTER TABLE {schema_name}."{table_name}" ADD CONSTRAINT {pk_name} PRIMARY KEY ({", ".join(info["primary_keys"])});'
+            pk_columns = ", ".join(info["primary_keys"])
+            
+            if db_type == "MYSQL":
+                pk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{table_name}{quote_char} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            else:
+                pk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{table_name}{quote_char} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            
             pk_statements.append(pk_stmt)
     
     # Collect columns referenced by foreign keys that aren't primary keys
@@ -319,7 +467,7 @@ def generate_ddl(db_type, excel_file_path):
                 break
         
         if not is_pk:
-            quoted_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
+            quoted_column = f'{quote_char}{target_column}{quote_char}'
             
             # Create a unique constraint name and check for duplicates
             uq_name = f"UQ_{target_table}_{target_column}"
@@ -327,7 +475,12 @@ def generate_ddl(db_type, excel_file_path):
                 continue
                 
             unique_constraints.add(uq_name)
-            uq_stmt = f'ALTER TABLE {schema_name}."{target_table}" ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
+            
+            if db_type == "MYSQL":
+                uq_stmt = f'ALTER TABLE {schema_name}.{quote_char}{target_table}{quote_char} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
+            else:
+                uq_stmt = f'ALTER TABLE {schema_name}.{quote_char}{target_table}{quote_char} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
+            
             unique_statements.append(uq_stmt)
     
     # Generate FOREIGN KEY constraints
@@ -350,8 +503,8 @@ def generate_ddl(db_type, excel_file_path):
             print(f"Skipping foreign key to non-existent table: {target_table}")
             continue
         
-        quoted_source_column = f'"{source_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else source_column
-        quoted_target_column = f'"{target_column}"' if db_type in ["POSTGRESQL", "ORACLE"] else target_column
+        quoted_source_column = f'{quote_char}{source_column}{quote_char}'
+        quoted_target_column = f'{quote_char}{target_column}{quote_char}'
         
         # Create a unique constraint name
         fk_name = f"FK_{source_table}_{source_column}_TO_{target_table}"
@@ -365,7 +518,11 @@ def generate_ddl(db_type, excel_file_path):
             
         fk_constraints.add(fk_name)
         
-        fk_stmt = f'ALTER TABLE {schema_name}."{source_table}" ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}."{target_table}"({quoted_target_column});'
+        if db_type == "MYSQL":
+            fk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{source_table}{quote_char} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quote_char}{target_table}{quote_char}({quoted_target_column});'
+        else:
+            fk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{source_table}{quote_char} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quote_char}{target_table}{quote_char}({quoted_target_column});'
+        
         fk_statements.append(fk_stmt)
     
     # Combine all statements
