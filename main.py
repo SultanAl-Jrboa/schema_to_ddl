@@ -2,7 +2,6 @@ from flask import Flask, request, render_template, send_file
 import pandas as pd
 import os
 import networkx as nx
-import hashlib
 
 def map_data_type(db_type, data_type):
     """
@@ -148,69 +147,6 @@ def normalize_name(name):
         return str(name).strip()
     return name
 
-def generate_short_name(input_str, max_length=20):
-    """
-    Generate a short unique identifier based on the input string
-    """
-    # Create a hash of the input string
-    hash_object = hashlib.md5(input_str.encode())
-    hex_dig = hash_object.hexdigest()
-    
-    # Take first 8 characters of hash and combine with truncated input string
-    short_hash = hex_dig[:8]
-    
-    # Take first few characters of the input string
-    prefix_length = max_length - len(short_hash) - 1
-    if prefix_length <= 0:
-        prefix_length = 1
-    
-    prefix = input_str[:prefix_length]
-    
-    # Combine them
-    return f"{prefix}_{short_hash}"
-
-def should_skip_column(column_name, db_type):
-    """
-    Check if a column should be skipped (for SQL Server CDC columns)
-    """
-    if db_type == "SQL_SERVER":
-        skip_columns = [
-            "CDC_TS", "CDC_operation", "CDC_start_lsn", "CDC_end_lsn", 
-            "CDC_seqval", "CDC_update_mask", "CDC_command_id"
-        ]
-        return column_name in skip_columns
-    return False
-
-def get_or_create_schema(table_name, default_schema="dbo"):
-    """
-    Determine or create schema for a table name
-    """
-    # If table name contains a dot, split it
-    if "." in table_name:
-        schema, table = table_name.split(".", 1)
-        return schema, table
-    
-    # For SQL Server, if table is not in dbo, create a schema with the table name
-    # For other databases, use the default schema
-    return table_name, table_name
-
-def generate_short_constraint_name(prefix, source_table, source_column, target_table, target_column, max_length=30):
-    """
-    Generate a short, unique constraint name
-    """
-    # Create a base name from table and column names
-    base_name = f"{source_table}_{source_column}_{target_table}_{target_column}"
-    
-    # Create a hash of the base name
-    hash_object = hashlib.md5(base_name.encode())
-    short_hash = hash_object.hexdigest()[:8]
-    
-    # Combine prefix with hash
-    full_name = f"{prefix}_{short_hash}"
-    
-    # Truncate if necessary
-    return full_name[:max_length]
-
 def generate_ddl(db_type, excel_file_path):
     # Read Excel file
     try:
@@ -221,59 +157,51 @@ def generate_ddl(db_type, excel_file_path):
             if specified_db_type in ["MYSQL", "ORACLE", "SQL_SERVER", "POSTGRESQL"]:
                 db_type = specified_db_type
         
-        # Read metadata
+        # Print column names for debugging
         df_metadata = pd.read_excel(excel_file_path, sheet_name="Metadata", skiprows=4)
         print("Available columns in Metadata sheet:", df_metadata.columns.tolist())
         
-        # Validate required columns
+        # Make sure required columns exist
         required_columns = ["Table Name", "Attribute Name"]
         for col in required_columns:
             if col not in df_metadata.columns:
                 raise Exception(f"Required column '{col}' is missing from Excel file")
         
         df_metadata = df_metadata.dropna(subset=["Table Name", "Attribute Name"])
-        default_schema_name = "NIC_DWH_STG"
+        schema_name = "NIC_DWH_STG"
     except Exception as e:
         raise Exception(f"Error reading Excel file: {str(e)}")
     
-    # Initialize DDL statements
+    # Add schema creation statement
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
     
-    # Track schemas to create (especially for SQL Server)
-    schemas_to_create = set([default_schema_name, "dbo"])
+    if db_type == "ORACLE":
+        ddl_statements.append(f"-- Create schema if it doesn't exist\n-- Uncomment this if the schema doesn't already exist in your database\n-- CREATE USER {schema_name} IDENTIFIED BY password;\n-- GRANT CONNECT, RESOURCE TO {schema_name};\n")
+    elif db_type == "POSTGRESQL":
+        ddl_statements.append(f"-- Create schema if it doesn't exist\n-- Uncomment this if the schema doesn't already exist in your database\n-- CREATE SCHEMA {schema_name};\n")
+    elif db_type == "SQL_SERVER":
+        ddl_statements.append(f"-- Create schema if it doesn't exist\n-- Uncomment this if the schema doesn't already exist in your database\n-- CREATE SCHEMA {schema_name};\n")
+    elif db_type == "MYSQL":
+        ddl_statements.append(f"-- Create schema if it doesn't exist\n-- Uncomment this if the schema doesn't already exist in your database\n-- CREATE DATABASE IF NOT EXISTS {schema_name};\n-- USE {schema_name};\n")
     
-    # Collect table and column information
+    # Track column information separately to avoid string comparison issues
     table_info = {}
     foreign_keys = []
+    
+    # Keep track of all table names to normalize them
     all_table_names = set()
     
-    # Process metadata rows
+    # First pass: Collect table and column information
     for index, row in df_metadata.iterrows():
         # Skip rows with missing required data
         if pd.isna(row.get("Table Name")) or pd.isna(row.get("Attribute Name")):
             continue
-        
-        # Normalize table and column names
-        original_table_name = normalize_name(row["Table Name"])
+            
+        table_name = normalize_name(row["Table Name"])
         column_name = normalize_name(row["Attribute Name"])
         
-        # Skip CDC columns for SQL Server
-        if should_skip_column(column_name, db_type):
-            continue
-        
-        # Determine schema and table name
-        if db_type == "SQL_SERVER":
-            schema_name, table_name = get_or_create_schema(original_table_name)
-            schemas_to_create.add(schema_name)
-        else:
-            schema_name = default_schema_name
-            table_name = original_table_name
-        
-        # Add to tracked tables and schemas
+        # Add to set of all table names
         all_table_names.add(table_name)
-        
-        # Consistent table key across databases
-        table_key = table_name if db_type != "SQL_SERVER" else f"{schema_name}.{table_name}"
         
         # Get data type with safe handling
         default_type = "VARCHAR(255)" if db_type != "ORACLE" else "VARCHAR2(255)"
@@ -303,11 +231,10 @@ def generate_ddl(db_type, excel_file_path):
             is_timestamp = str(row["Is it the Timestamp attribute?"]).strip().upper() == "YES"  
         
         # Initialize table info if needed
-        if table_key not in table_info:
-            table_info[table_key] = {
+        if table_name not in table_info:
+            table_info[table_name] = {
                 'columns': [],
-                'primary_keys': [],
-                'schema_name': schema_name
+                'primary_keys': []
             }
         
         # Store column information in structured format
@@ -323,9 +250,9 @@ def generate_ddl(db_type, excel_file_path):
         }
         
         if is_primary_key:
-            table_info[table_key]['primary_keys'].append(quoted_column_name)
+            table_info[table_name]['primary_keys'].append(quoted_column_name)
         
-        table_info[table_key]['columns'].append(column_info)
+        table_info[table_name]['columns'].append(column_info)
         
         # Check for foreign key relationships
         # Find which columns contain reference information
@@ -355,19 +282,11 @@ def generate_ddl(db_type, excel_file_path):
         if ref_table_idx is not None and ref_attr_idx is not None:
             if ref_table_idx < len(row) and ref_attr_idx < len(row):
                 if pd.notna(row.iloc[ref_table_idx]) and pd.notna(row.iloc[ref_attr_idx]):
-                    ref_table_orig = normalize_name(row.iloc[ref_table_idx])
+                    ref_table = normalize_name(row.iloc[ref_table_idx])
                     ref_column = normalize_name(row.iloc[ref_attr_idx])
                     
                     # Process references
-                    if ref_table_orig and ref_column:
-                        # Handle SQL Server schema.table format
-                        if db_type == "SQL_SERVER" and "." in ref_table_orig:
-                            ref_schema_name, ref_table = get_or_create_schema(ref_table_orig)
-                            schemas_to_create.add(ref_schema_name)
-                        else:
-                            ref_schema_name = schema_name
-                            ref_table = ref_table_orig
-                            
+                    if ref_table and ref_column:
                         # Handle multiple references (pipe-separated)
                         if '|' in ref_table and '|' in ref_column:
                             ref_tables = ref_table.split('|')
@@ -385,19 +304,11 @@ def generate_ddl(db_type, excel_file_path):
                                     # Add table name to set
                                     all_table_names.add(rt)
                                     
-                                    # For SQL Server, store the reference with schema
-                                    if db_type == "SQL_SERVER":
-                                        ref_target_key = f"{ref_schema_name}.{rt}"
-                                    else:
-                                        ref_target_key = rt
-                                        
                                     foreign_keys.append({
-                                        'source_table': table_key,
+                                        'source_table': table_name,
                                         'source_column': column_name,
-                                        'target_table': ref_target_key,
-                                        'target_column': rc,
-                                        'source_schema': schema_name,
-                                        'target_schema': ref_schema_name
+                                        'target_table': rt,
+                                        'target_column': rc
                                     })
                         else:
                             # Single reference
@@ -409,30 +320,12 @@ def generate_ddl(db_type, excel_file_path):
                                 # Add table name to set
                                 all_table_names.add(ref_table)
                                 
-                                # For SQL Server, store the reference with schema
-                                if db_type == "SQL_SERVER":
-                                    ref_target_key = f"{ref_schema_name}.{ref_table}"
-                                else:
-                                    ref_target_key = ref_table
-                                    
                                 foreign_keys.append({
-                                    'source_table': table_key,
+                                    'source_table': table_name,
                                     'source_column': column_name,
-                                    'target_table': ref_target_key,
-                                    'target_column': ref_column,
-                                    'source_schema': schema_name,
-                                    'target_schema': ref_schema_name
+                                    'target_table': ref_table,
+                                    'target_column': ref_column
                                 })
-    
-    # For SQL Server, add schema creation statements
-    if db_type == "SQL_SERVER":
-        schema_statements = []
-        for schema in schemas_to_create:
-            if schema != "dbo":  # Don't need to create dbo schema
-                schema_statements.append(f"-- IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '{schema}') BEGIN\n--     EXEC('CREATE SCHEMA [{schema}]');\n-- END;")
-        
-        if schema_statements:
-            ddl_statements.append("\n".join(schema_statements) + "\n")
     
     # Check for table name typos by comparing similar names
     table_name_mapping = {}
@@ -444,8 +337,8 @@ def generate_ddl(db_type, excel_file_path):
         if standard_name in table_name_mapping:
             # Keep the name that appears more frequently
             existing_name = table_name_mapping[standard_name]
-            existing_count = sum(1 for t in table_info if t.endswith(existing_name))
-            new_count = sum(1 for t in table_info if t.endswith(name))
+            existing_count = sum(1 for t in table_info if t == existing_name)
+            new_count = sum(1 for t in table_info if t == name)
             
             if new_count > existing_count:
                 table_name_mapping[standard_name] = name
@@ -454,38 +347,16 @@ def generate_ddl(db_type, excel_file_path):
     
     # Fix table name typos in foreign keys
     for fk in foreign_keys:
-        if db_type == "SQL_SERVER":
-            # Extract the table part from schema.table
-            source_parts = fk['source_table'].split(".", 1)
-            target_parts = fk['target_table'].split(".", 1)
+        source_std = fk['source_table'].upper().replace(" ", "")
+        target_std = fk['target_table'].upper().replace(" ", "")
+        
+        if source_std in table_name_mapping and fk['source_table'] != table_name_mapping[source_std]:
+            print(f"Correcting table name: {fk['source_table']} -> {table_name_mapping[source_std]}")
+            fk['source_table'] = table_name_mapping[source_std]
             
-            source_schema = source_parts[0]
-            source_table = source_parts[1] if len(source_parts) > 1 else source_parts[0]
-            
-            target_schema = target_parts[0]
-            target_table = target_parts[1] if len(target_parts) > 1 else target_parts[0]
-            
-            source_std = source_table.upper().replace(" ", "")
-            target_std = target_table.upper().replace(" ", "")
-            
-            if source_std in table_name_mapping and source_table != table_name_mapping[source_std]:
-                print(f"Correcting table name: {source_table} -> {table_name_mapping[source_std]}")
-                fk['source_table'] = f"{source_schema}.{table_name_mapping[source_std]}"
-                
-            if target_std in table_name_mapping and target_table != table_name_mapping[target_std]:
-                print(f"Correcting table name: {target_table} -> {table_name_mapping[target_std]}")
-                fk['target_table'] = f"{target_schema}.{table_name_mapping[target_std]}"
-        else:
-            source_std = fk['source_table'].upper().replace(" ", "")
-            target_std = fk['target_table'].upper().replace(" ", "")
-            
-            if source_std in table_name_mapping and fk['source_table'] != table_name_mapping[source_std]:
-                print(f"Correcting table name: {fk['source_table']} -> {table_name_mapping[source_std]}")
-                fk['source_table'] = table_name_mapping[source_std]
-                
-            if target_std in table_name_mapping and fk['target_table'] != table_name_mapping[target_std]:
-                print(f"Correcting table name: {fk['target_table']} -> {table_name_mapping[target_std]}")
-                fk['target_table'] = table_name_mapping[target_std]
+        if target_std in table_name_mapping and fk['target_table'] != table_name_mapping[target_std]:
+            print(f"Correcting table name: {fk['target_table']} -> {table_name_mapping[target_std]}")
+            fk['target_table'] = table_name_mapping[target_std]
     
     # Create a directed graph for cycle detection
     graph = nx.DiGraph()
@@ -520,7 +391,7 @@ def generate_ddl(db_type, excel_file_path):
     # Generate CREATE TABLE statements
     table_ddl_statements = []
     
-    for table_key, info in table_info.items():
+    for table_name, info in table_info.items():
         column_defs = []
         
         for col in info['columns']:
@@ -551,15 +422,6 @@ def generate_ddl(db_type, excel_file_path):
                 
             column_defs.append(col_def)
         
-        # Extract table name (and schema for SQL Server)
-        if db_type == "SQL_SERVER":
-            parts = table_key.split(".", 1)
-            schema_name = parts[0]
-            table_name = parts[1] if len(parts) > 1 else parts[0]
-        else:
-            schema_name = default_schema_name
-            table_name = table_key
-            
         # Create table DDL with proper quoting
         quoted_table_name = format_identifier(table_name, db_type)
         
@@ -575,19 +437,9 @@ def generate_ddl(db_type, excel_file_path):
     
     # Generate PRIMARY KEY constraints
     pk_statements = []
-    for table_key, info in table_info.items():
+    for table_name, info in table_info.items():
         if info['primary_keys']:
-            # Get a nice short name for the constraint
-            if db_type == "SQL_SERVER":
-                parts = table_key.split(".", 1)
-                schema_name = parts[0]
-                table_name = parts[1] if len(parts) > 1 else parts[0]
-            else:
-                schema_name = default_schema_name
-                table_name = table_key
-                
-            # Create a shorter PK name
-            pk_name = f"PK_{generate_short_name(table_name)}"
+            pk_name = f"PK_{table_name}"
             pk_columns = ", ".join(info["primary_keys"])
             
             quoted_table_name = format_identifier(table_name, db_type)
@@ -610,33 +462,24 @@ def generate_ddl(db_type, excel_file_path):
     unique_statements = []
     unique_constraints = set()  # Track constraints to avoid duplicates
     
-    for target_table_key, target_column in referenced_columns:
+    for target_table, target_column in referenced_columns:
         # Skip if the table isn't in our processed tables
-        if target_table_key not in table_info:
+        if target_table not in table_info:
             continue
             
         # Check if it's already a primary key
         is_pk = False
-        for col in table_info[target_table_key]['columns']:
+        for col in table_info[target_table]['columns']:
             if col['name'] == target_column and col['is_primary_key']:
                 is_pk = True
                 break
         
         if not is_pk:
-            # Extract table name (and schema for SQL Server)
-            if db_type == "SQL_SERVER":
-                parts = target_table_key.split(".", 1)
-                schema_name = parts[0]
-                table_name = parts[1] if len(parts) > 1 else parts[0]
-            else:
-                schema_name = default_schema_name
-                table_name = target_table_key
-                
             quoted_column = format_identifier(target_column, db_type)
-            quoted_table_name = format_identifier(table_name, db_type)
+            quoted_table_name = format_identifier(target_table, db_type)
             
-            # Create a shorter unique constraint name
-            uq_name = f"UQ_{generate_short_name(table_name + '_' + target_column)}"
+            # Create a unique constraint name and check for duplicates
+            uq_name = f"UQ_{target_table}_{target_column}"
             if uq_name in unique_constraints:
                 continue
                 
@@ -671,62 +514,34 @@ def generate_ddl(db_type, excel_file_path):
             print(f"Skipping foreign key to non-existent table: {target_table}")
             continue
         
-        # Generate a short, unique foreign key constraint name
-        fk_name = generate_short_constraint_name(
-            "FK", 
-            source_table.split('.')[-1], 
-            source_column, 
-            target_table.split('.')[-1], 
-            target_column
-        )
-        
-        # Extract schema and table names
-        if db_type == "SQL_SERVER":
-            source_parts = source_table.split(".", 1)
-            source_schema = source_parts[0]
-            source_table_name = source_parts[1] if len(source_parts) > 1 else source_parts[0]
-            
-            target_parts = target_table.split(".", 1)
-            target_schema = target_parts[0]
-            target_table_name = target_parts[1] if len(target_parts) > 1 else target_parts[0]
-        else:
-            source_schema = default_schema_name
-            source_table_name = source_table.split('.')[-1]
-            target_schema = default_schema_name
-            target_table_name = target_table.split('.')[-1]
-        
-        # Quote identifiers
         quoted_source_column = format_identifier(source_column, db_type)
         quoted_target_column = format_identifier(target_column, db_type)
-        quoted_source_table_name = format_identifier(source_table_name, db_type)
-        quoted_target_table_name = format_identifier(target_table_name, db_type)
+        quoted_source_table = format_identifier(source_table, db_type)
+        quoted_target_table = format_identifier(target_table, db_type)
         
-        # Make sure constraint name is unique
+        # Create a unique constraint name
+        fk_name = f"FK_{source_table}_{source_column}_TO_{target_table}"
+        
+        # Make sure we don't have duplicate constraint names
         base_fk_name = fk_name
         counter = 1
         while fk_name in fk_constraints:
             fk_name = f"{base_fk_name}_{counter}"
             counter += 1
-        
+            
         fk_constraints.add(fk_name)
         
-        # Generate foreign key constraint statement
+        # For SQL Server, don't quote the schema name
         if db_type == "SQL_SERVER":
-            fk_stmt = f'ALTER TABLE {source_schema}.{quoted_source_table_name} ADD CONSTRAINT {fk_name} ' \
-                      f'FOREIGN KEY ({quoted_source_column}) ' \
-                      f'REFERENCES {target_schema}.{quoted_target_table_name}({quoted_target_column});'
+            fk_stmt = f'ALTER TABLE {schema_name}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quoted_target_table}({quoted_target_column});'
         else:
-            quoted_source_schema = format_identifier(source_schema, db_type) if db_type == "POSTGRESQL" else source_schema
-            quoted_target_schema = format_identifier(target_schema, db_type) if db_type == "POSTGRESQL" else target_schema
-            
-            fk_stmt = f'ALTER TABLE {quoted_source_schema}.{quoted_source_table_name} ADD CONSTRAINT {fk_name} ' \
-                      f'FOREIGN KEY ({quoted_source_column}) ' \
-                      f'REFERENCES {quoted_target_schema}.{quoted_target_table_name}({quoted_target_column});'
+            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+            fk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_schema}.{quoted_target_table}({quoted_target_column});'
         
         fk_statements.append(fk_stmt)
     
     # Combine all statements
-    final_statements = (
+    all_statements = (
         ddl_statements + 
         ["\n-- Create tables"] +
         table_ddl_statements + 
@@ -738,9 +553,9 @@ def generate_ddl(db_type, excel_file_path):
         fk_statements
     )
     
-    return "\n\n".join(final_statements)
+    return "\n\n".join(all_statements)
 
-# Flask application
+
 app = Flask(__name__)
 
 @app.route('/', methods=['GET', 'POST'])
@@ -757,80 +572,13 @@ def index():
                 db_type = request.form.get('db_type', 'POSTGRESQL')
                 ddl_output = generate_ddl(db_type, file_path)
                 ddl_file_path = os.path.join("outputs", "ddl_output.sql")
-                with open(ddl_file_path, "w", encoding='utf-8') as f:
+                with open(ddl_file_path, "w") as f:
                     f.write(ddl_output)
                 return send_file(ddl_file_path, as_attachment=True)
             except Exception as e:
                 return f"Error: {str(e)}"
     
     return render_template('index.html')
-
-# Create a simple HTML template for the upload form
-def create_upload_template():
-    template = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>DDL Generator</title>
-        <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                max-width: 500px; 
-                margin: 0 auto; 
-                padding: 20px; 
-            }
-            h1 { text-align: center; }
-            form { 
-                background: #f4f4f4; 
-                padding: 20px; 
-                border-radius: 5px; 
-            }
-            input, select { 
-                width: 100%; 
-                padding: 10px; 
-                margin: 10px 0; 
-                box-sizing: border-box; 
-            }
-            input[type="submit"] {
-                background: #4CAF50;
-                color: white;
-                border: none;
-                cursor: pointer;
-            }
-            input[type="submit"]:hover {
-                background: #45a049;
-            }
-        </style>
-    </head>
-    <body>
-        <h1>DDL Generator</h1>
-        <form method="POST" enctype="multipart/form-data">
-            <label for="file">Select Excel File:</label>
-            <input type="file" name="file" accept=".xlsx,.xls" required>
-            
-            <label for="db_type">Select Database Type:</label>
-            <select name="db_type" required>
-                <option value="POSTGRESQL">PostgreSQL</option>
-                <option value="MYSQL">MySQL</option>
-                <option value="ORACLE">Oracle</option>
-                <option value="SQL_SERVER">SQL Server</option>
-            </select>
-            
-            <input type="submit" value="Generate DDL">
-        </form>
-    </body>
-    </html>
-    '''
-    
-    # Ensure templates directory exists
-    os.makedirs("templates", exist_ok=True)
-    
-    # Write the template
-    with open("templates/index.html", "w", encoding='utf-8') as f:
-        f.write(template)
-
-# Create the upload template when the script is run
-create_upload_template()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
