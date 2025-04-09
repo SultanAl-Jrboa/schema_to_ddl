@@ -115,29 +115,29 @@ def get_identifier_quote(db_type):
     """
     if db_type == "MYSQL":
         return "`"
-    elif db_type == "SQL_SERVER" or db_type == "POSTGRESQL" or db_type == "ORACLE":
+    elif db_type == "POSTGRESQL" or db_type == "ORACLE":
         return "\""
+    elif db_type == "SQL_SERVER":
+        return "["  # Opening bracket
     else:
         return "\""
 
-def format_enum_type(db_type, values):
+def get_identifier_quote_close(db_type):
     """
-    Format ENUM type for different databases
+    Returns the appropriate closing identifier quote character(s) for each database type
     """
-    if db_type == "MYSQL":
-        # MySQL uses ENUM('val1', 'val2')
-        return f"ENUM({', '.join([f\"'{val}'\" for val in values])})"
-    elif db_type == "POSTGRESQL":
-        # PostgreSQL uses custom types, but we'll use CHECK constraints instead for simplicity
-        return f"VARCHAR(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
-    elif db_type == "ORACLE":
-        # Oracle uses CHECK constraints
-        return f"VARCHAR2(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
-    elif db_type == "SQL_SERVER":
-        # SQL Server uses CHECK constraints
-        return f"VARCHAR(10) CHECK (value IN ({', '.join([f\"'{val}'\" for val in values])}))"
+    if db_type == "SQL_SERVER":
+        return "]"  # Closing bracket
     else:
-        return f"VARCHAR(10)"
+        return get_identifier_quote(db_type)  # Same as opening for others
+
+def format_identifier(name, db_type):
+    """
+    Format identifier with the correct quoting style for the database
+    """
+    open_quote = get_identifier_quote(db_type)
+    close_quote = get_identifier_quote_close(db_type)
+    return f"{open_quote}{name}{close_quote}"
 
 def normalize_name(name):
     """
@@ -171,9 +171,6 @@ def generate_ddl(db_type, excel_file_path):
         schema_name = "NIC_DWH_STG"
     except Exception as e:
         raise Exception(f"Error reading Excel file: {str(e)}")
-    
-    # Get the appropriate quote character for identifiers
-    quote_char = get_identifier_quote(db_type)
     
     # Add schema creation statement
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
@@ -216,7 +213,7 @@ def generate_ddl(db_type, excel_file_path):
         mapped_data_type = map_data_type(db_type, data_type)
         
         # Format column name for the database
-        quoted_column_name = f'{quote_char}{column_name}{quote_char}'
+        quoted_column_name = format_identifier(column_name, db_type)
         
         # Check if this column is a primary key
         is_primary_key = False
@@ -410,7 +407,8 @@ def generate_ddl(db_type, excel_file_path):
                     col_def = f"{col['quoted_name']} ENUM('INSERT', 'UPDATE', 'DELETE')"
                 else:
                     # For other databases, use CHECK constraints
-                    col_def += f" CHECK ({col['quoted_name']} IN ('INSERT', 'UPDATE', 'DELETE'))"
+                    check_column = col['quoted_name']
+                    col_def += f" CHECK ({check_column} IN ('INSERT', 'UPDATE', 'DELETE'))"
                 
             if col['is_timestamp']:
                 if db_type == "MYSQL":
@@ -424,11 +422,17 @@ def generate_ddl(db_type, excel_file_path):
                 
             column_defs.append(col_def)
         
-        # Create table DDL
-        if db_type == "MYSQL":
-            table_ddl = f'CREATE TABLE {schema_name}.{quote_char}{table_name}{quote_char} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+        # Create table DDL with proper quoting
+        quoted_table_name = format_identifier(table_name, db_type)
+        
+        # In SQL Server, we don't need to prefix schema name with []
+        if db_type == "SQL_SERVER":
+            table_ddl = f'CREATE TABLE {schema_name}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         else:
-            table_ddl = f'CREATE TABLE {schema_name}.{quote_char}{table_name}{quote_char} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+            # For other databases, format schema name consistently with table names
+            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+            table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+            
         table_ddl_statements.append(table_ddl)
     
     # Generate PRIMARY KEY constraints
@@ -438,10 +442,14 @@ def generate_ddl(db_type, excel_file_path):
             pk_name = f"PK_{table_name}"
             pk_columns = ", ".join(info["primary_keys"])
             
-            if db_type == "MYSQL":
-                pk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{table_name}{quote_char} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            quoted_table_name = format_identifier(table_name, db_type)
+            
+            # For SQL Server, don't quote the schema name
+            if db_type == "SQL_SERVER":
+                pk_stmt = f'ALTER TABLE {schema_name}.{quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
             else:
-                pk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{table_name}{quote_char} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+                quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+                pk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
             
             pk_statements.append(pk_stmt)
     
@@ -467,7 +475,8 @@ def generate_ddl(db_type, excel_file_path):
                 break
         
         if not is_pk:
-            quoted_column = f'{quote_char}{target_column}{quote_char}'
+            quoted_column = format_identifier(target_column, db_type)
+            quoted_table_name = format_identifier(target_table, db_type)
             
             # Create a unique constraint name and check for duplicates
             uq_name = f"UQ_{target_table}_{target_column}"
@@ -476,10 +485,12 @@ def generate_ddl(db_type, excel_file_path):
                 
             unique_constraints.add(uq_name)
             
-            if db_type == "MYSQL":
-                uq_stmt = f'ALTER TABLE {schema_name}.{quote_char}{target_table}{quote_char} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
+            # For SQL Server, don't quote the schema name
+            if db_type == "SQL_SERVER":
+                uq_stmt = f'ALTER TABLE {schema_name}.{quoted_table_name} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
             else:
-                uq_stmt = f'ALTER TABLE {schema_name}.{quote_char}{target_table}{quote_char} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
+                quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+                uq_stmt = f'ALTER TABLE {quoted_schema}.{quoted_table_name} ADD CONSTRAINT {uq_name} UNIQUE ({quoted_column});'
             
             unique_statements.append(uq_stmt)
     
@@ -503,8 +514,10 @@ def generate_ddl(db_type, excel_file_path):
             print(f"Skipping foreign key to non-existent table: {target_table}")
             continue
         
-        quoted_source_column = f'{quote_char}{source_column}{quote_char}'
-        quoted_target_column = f'{quote_char}{target_column}{quote_char}'
+        quoted_source_column = format_identifier(source_column, db_type)
+        quoted_target_column = format_identifier(target_column, db_type)
+        quoted_source_table = format_identifier(source_table, db_type)
+        quoted_target_table = format_identifier(target_table, db_type)
         
         # Create a unique constraint name
         fk_name = f"FK_{source_table}_{source_column}_TO_{target_table}"
@@ -518,10 +531,12 @@ def generate_ddl(db_type, excel_file_path):
             
         fk_constraints.add(fk_name)
         
-        if db_type == "MYSQL":
-            fk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{source_table}{quote_char} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quote_char}{target_table}{quote_char}({quoted_target_column});'
+        # For SQL Server, don't quote the schema name
+        if db_type == "SQL_SERVER":
+            fk_stmt = f'ALTER TABLE {schema_name}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quoted_target_table}({quoted_target_column});'
         else:
-            fk_stmt = f'ALTER TABLE {schema_name}.{quote_char}{source_table}{quote_char} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {schema_name}.{quote_char}{target_table}{quote_char}({quoted_target_column});'
+            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+            fk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_schema}.{quoted_target_table}({quoted_target_column});'
         
         fk_statements.append(fk_stmt)
     
