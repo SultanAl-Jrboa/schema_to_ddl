@@ -103,8 +103,8 @@ def generate_ddl(db_type, excel_file_path):
         
         # Check if this column is Timestamp
         is_timestamp = False
-        if "Is it the SyncTimestamp attribute?" in row and pd.notna(row["Is it the SyncTimestamp attribute?"]):
-            is_timestamp = str(row["Is it the SyncTimestamp attribute?"]).strip().upper() == "YES"
+        if "Is it the Timestamp attribute?" in row and pd.notna(row["Is it the Timestamp attribute?"]):
+            is_timestamp = str(row["Is it the Timestamp attribute?"]).strip().upper() == "YES"  
         
         # Initialize table info if needed
         if table_name not in table_info:
