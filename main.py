@@ -178,6 +178,9 @@ def generate_ddl(db_type, excel_file_path):
     all_table_names = set()
     schemas_to_create = set()
 
+    # Check if there's a Table Schema column
+    has_table_schema_column = "Table Schema" in df_metadata.columns
+
     # Process metadata
     for index, row in df_metadata.iterrows():
         if pd.isna(row.get("Table Name")) or pd.isna(row.get("Attribute Name")):
@@ -194,17 +197,31 @@ def generate_ddl(db_type, excel_file_path):
                 continue
         
         # Handle SQL Server schemas
+        schema_part = "dbo"  # Default schema
         if db_type == "SQL_SERVER":
             # Check for schema in table name (schema.table)
             if '.' in table_name:
-                schema_part = table_name.split('.')[0]
+                schema_part, table_part = table_name.split('.', 1)
+                table_name = table_part  # Update table_name to exclude schema
                 if schema_part.lower() != "dbo":
                     schemas_to_create.add(schema_part)
-            # Check for separate Schema column if available
-            elif "Schema" in row and pd.notna(row["Schema"]):
-                schema_part = normalize_name(row["Schema"])
-                if schema_part.lower() != "dbo":
+            # Check for separate Table Schema column if available
+            elif has_table_schema_column and pd.notna(row["Table Schema"]):
+                schema_part = normalize_name(row["Table Schema"])
+                if schema_part.lower() != "dbo" and schema_part:
                     schemas_to_create.add(schema_part)
+        
+        # Store schema for SQL Server
+        if db_type == "SQL_SERVER":
+            # Store the schema with the table_name as a key for later use
+            if not table_name in table_info:
+                table_info[table_name] = {
+                    'columns': [], 
+                    'primary_keys': [],
+                    'schema': schema_part
+                }
+            elif 'schema' not in table_info[table_name]:
+                table_info[table_name]['schema'] = schema_part
         
         all_table_names.add(table_name)
         
@@ -232,7 +249,12 @@ def generate_ddl(db_type, excel_file_path):
         
         # Store table info
         if table_name not in table_info:
-            table_info[table_name] = {'columns': [], 'primary_keys': []}
+            table_info[table_name] = {
+                'columns': [], 
+                'primary_keys': []
+            }
+            if db_type == "SQL_SERVER":
+                table_info[table_name]['schema'] = schema_part
         
         column_info = {
             'name': column_name,
@@ -343,32 +365,21 @@ def generate_ddl(db_type, excel_file_path):
                 
             column_defs.append(col_def)
         
-        # Handle SQL Server schema formatting
-        if db_type == "SQL_SERVER":
-            # Determine schema from table name or default to dbo
-            if '.' in table_name:
-                schema_part, table_part = table_name.split('.', 1)
-                full_table_name = f"{schema_part}.{table_part}"
-            elif "Schema" in df_metadata.columns:
-                # Try to get schema from Schema column if exists
-                schema_values = df_metadata[df_metadata["Table Name"] == table_name]["Schema"]
-                if not schema_values.empty:
-                    schema_part = normalize_name(schema_values.iloc[0])
-                    if pd.notna(schema_part) and schema_part.lower() != "dbo":
-                        full_table_name = f"{schema_part}.{table_name}"
-                    else:
-                        full_table_name = f"dbo.{table_name}"
-                else:
-                    full_table_name = f"dbo.{table_name}"
-            else:
-                full_table_name = f"dbo.{table_name}"
-                
-            quoted_table_name = format_identifier(table_part if '.' in table_name else table_name, db_type)
+        quoted_table_name = format_identifier(table_name, db_type)
+        
+        # ORACLE: Remove schema prefix as requested
+        if db_type == "ORACLE":
+            table_ddl = f'CREATE TABLE {quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+        
+        # SQL Server: Use schema from Table Schema column if available
+        elif db_type == "SQL_SERVER":
+            schema_part = info.get('schema', 'dbo')
+            full_table_name = f"{schema_part}.{table_name}"
             table_ddl = f'CREATE TABLE {full_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+        
+        # Other databases
         else:
-            # Original handling for other databases
-            quoted_table_name = format_identifier(table_name, db_type)
-            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
+            quoted_schema = format_identifier(schema_name, db_type)
             table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         
         table_ddl_statements.append(table_ddl)
@@ -380,13 +391,18 @@ def generate_ddl(db_type, excel_file_path):
             pk_name = f"PK_{table_name[:20]}"  # Shortened name
             pk_columns = ", ".join(info["primary_keys"])
             
-            if db_type == "SQL_SERVER":
-                if '.' in table_name:
-                    full_table_name = table_name
-                else:
-                    full_table_name = f"dbo.{table_name}"
-                quoted_table_name = format_identifier(table_name.split('.')[-1], db_type)
+            # ORACLE: Remove schema prefix
+            if db_type == "ORACLE":
+                quoted_table_name = format_identifier(table_name, db_type)
+                pk_stmt = f'ALTER TABLE {quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            
+            # SQL Server: Use schema from Table Schema column
+            elif db_type == "SQL_SERVER":
+                schema_part = info.get('schema', 'dbo')
+                full_table_name = f"{schema_part}.{table_name}"
                 pk_stmt = f'ALTER TABLE {full_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            
+            # Other databases
             else:
                 quoted_table_name = format_identifier(table_name, db_type)
                 quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
@@ -420,23 +436,21 @@ def generate_ddl(db_type, excel_file_path):
         fk_name = f"FK_{fk_counter}"
         fk_counter += 1
         
-        if db_type == "SQL_SERVER":
-            # Format source table
-            if '.' in source_table:
-                source_table_full = source_table
-            else:
-                source_table_full = f"dbo.{source_table}"
-            
-            # Format target table
-            if '.' in target_table:
-                target_table_full = target_table
-            else:
-                target_table_full = f"dbo.{target_table}"
-            
-            quoted_source_table = format_identifier(source_table.split('.')[-1], db_type)
-            quoted_target_table = format_identifier(target_table.split('.')[-1], db_type)
-            
+        # ORACLE: Remove schema prefix
+        if db_type == "ORACLE":
+            quoted_source_table = format_identifier(source_table, db_type)
+            quoted_target_table = format_identifier(target_table, db_type)
+            fk_stmt = f'ALTER TABLE {quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_target_table}({quoted_target_column});'
+        
+        # SQL Server: Use schema from Table Schema column
+        elif db_type == "SQL_SERVER":
+            source_schema = table_info[source_table].get('schema', 'dbo')
+            target_schema = table_info[target_table].get('schema', 'dbo')
+            source_table_full = f"{source_schema}.{source_table}"
+            target_table_full = f"{target_schema}.{target_table}"
             fk_stmt = f'ALTER TABLE {source_table_full} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {target_table_full}({quoted_target_column});'
+        
+        # Other databases
         else:
             quoted_source_table = format_identifier(source_table, db_type)
             quoted_target_table = format_identifier(target_table, db_type)
