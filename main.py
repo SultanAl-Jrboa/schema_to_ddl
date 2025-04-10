@@ -163,20 +163,12 @@ def generate_ddl(db_type, excel_file_path):
     # Schema creation statements
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
     
-    if db_type == "ORACLE":
-        ddl_statements.append(f"-- CREATE USER {default_schema_name} IDENTIFIED BY password;\n-- GRANT CONNECT, RESOURCE TO {default_schema_name};\n")
-    elif db_type == "POSTGRESQL":
-        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
-    elif db_type == "SQL_SERVER":
-        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
-    elif db_type == "MYSQL":
-        ddl_statements.append(f"-- CREATE DATABASE IF NOT EXISTS {default_schema_name};\n-- USE {default_schema_name};\n")
-    
     # Track objects
     table_info = {}
     foreign_keys = []
     all_table_names = set()
     schemas_to_create = set()
+    oracle_schemas_to_create = set()
 
     # Check if there's a Table Schema column
     has_table_schema_column = "Table Schema" in df_metadata.columns
@@ -200,9 +192,11 @@ def generate_ddl(db_type, excel_file_path):
         schema_part = default_schema_name  # Default schema
         if has_table_schema_column and pd.notna(row["Table Schema"]):
             schema_part = normalize_name(row["Table Schema"])
-            if schema_part and (db_type == "SQL_SERVER" or db_type == "ORACLE"):
+            if schema_part:
                 if db_type == "SQL_SERVER" and schema_part.lower() != "dbo":
                     schemas_to_create.add(schema_part)
+                elif db_type == "ORACLE" and schema_part.lower() != default_schema_name.lower():
+                    oracle_schemas_to_create.add(schema_part)
         else:
             # Handle schema in table name (schema.table) if no Table Schema column
             if '.' in table_name:
@@ -210,6 +204,8 @@ def generate_ddl(db_type, excel_file_path):
                 table_name = table_part  # Update table_name to exclude schema
                 if db_type == "SQL_SERVER" and schema_part.lower() != "dbo":
                     schemas_to_create.add(schema_part)
+                elif db_type == "ORACLE" and schema_part.lower() != default_schema_name.lower():
+                    oracle_schemas_to_create.add(schema_part)
             else:
                 # Use default schema if not specified and no dot in table name
                 if db_type == "SQL_SERVER":
@@ -321,6 +317,20 @@ def generate_ddl(db_type, excel_file_path):
                                     'target_column': ref_column
                                 })
     
+    # Add schema creation statements for Oracle
+    if db_type == "ORACLE" and oracle_schemas_to_create:
+        schema_ddls = ["\n-- Create Oracle users (schemas)"]
+        for schema in sorted(oracle_schemas_to_create):
+            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', schema):  # Validate schema name
+                schema_ddls.append(
+                    f"CREATE USER {schema} IDENTIFIED BY password;\n"
+                    f"GRANT CONNECT, RESOURCE TO {schema};"
+                )
+        ddl_statements.extend(schema_ddls)
+    # Also add default schema creation statement for Oracle
+    elif db_type == "ORACLE":
+        ddl_statements.append(f"-- CREATE USER {default_schema_name} IDENTIFIED BY password;\n-- GRANT CONNECT, RESOURCE TO {default_schema_name};\n")
+    
     # Add schema creation for SQL Server
     if db_type == "SQL_SERVER" and schemas_to_create:
         schema_ddls = ["\n-- Create non-dbo schemas"]
@@ -333,6 +343,14 @@ def generate_ddl(db_type, excel_file_path):
                     f"END;"
                 )
         ddl_statements.extend(schema_ddls)
+    elif db_type == "SQL_SERVER":
+        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
+    
+    # Add default schema statements for other database types
+    elif db_type == "POSTGRESQL":
+        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
+    elif db_type == "MYSQL":
+        ddl_statements.append(f"-- CREATE DATABASE IF NOT EXISTS {default_schema_name};\n-- USE {default_schema_name};\n")
 
     # Generate CREATE TABLE statements with proper schema handling
     table_ddl_statements = []
