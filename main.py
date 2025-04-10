@@ -156,7 +156,7 @@ def generate_ddl(db_type, excel_file_path):
                 raise Exception(f"Required column '{col}' is missing")
         
         df_metadata = df_metadata.dropna(subset=["Table Name", "Attribute Name"])
-        schema_name = "NIC_DWH_STG"
+        default_schema_name = "NIC_DWH_STG"
     except Exception as e:
         raise Exception(f"Error reading Excel file: {str(e)}")
     
@@ -164,13 +164,13 @@ def generate_ddl(db_type, excel_file_path):
     ddl_statements = [f"-- DDL for database: {db_type}\n"]
     
     if db_type == "ORACLE":
-        ddl_statements.append(f"-- CREATE USER {schema_name} IDENTIFIED BY password;\n-- GRANT CONNECT, RESOURCE TO {schema_name};\n")
+        ddl_statements.append(f"-- CREATE USER {default_schema_name} IDENTIFIED BY password;\n-- GRANT CONNECT, RESOURCE TO {default_schema_name};\n")
     elif db_type == "POSTGRESQL":
-        ddl_statements.append(f"-- CREATE SCHEMA {schema_name};\n")
+        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
     elif db_type == "SQL_SERVER":
-        ddl_statements.append(f"-- CREATE SCHEMA {schema_name};\n")
+        ddl_statements.append(f"-- CREATE SCHEMA {default_schema_name};\n")
     elif db_type == "MYSQL":
-        ddl_statements.append(f"-- CREATE DATABASE IF NOT EXISTS {schema_name};\n-- USE {schema_name};\n")
+        ddl_statements.append(f"-- CREATE DATABASE IF NOT EXISTS {default_schema_name};\n-- USE {default_schema_name};\n")
     
     # Track objects
     table_info = {}
@@ -196,32 +196,34 @@ def generate_ddl(db_type, excel_file_path):
             if any(cdc_col.lower() in column_name.lower() for cdc_col in cdc_columns):
                 continue
         
-        # Handle SQL Server schemas
-        schema_part = "dbo"  # Default schema
-        if db_type == "SQL_SERVER":
-            # Check for schema in table name (schema.table)
+        # Handle schemas for all database types if Table Schema column exists
+        schema_part = default_schema_name  # Default schema
+        if has_table_schema_column and pd.notna(row["Table Schema"]):
+            schema_part = normalize_name(row["Table Schema"])
+            if schema_part and (db_type == "SQL_SERVER" or db_type == "ORACLE"):
+                if db_type == "SQL_SERVER" and schema_part.lower() != "dbo":
+                    schemas_to_create.add(schema_part)
+        else:
+            # Handle schema in table name (schema.table) if no Table Schema column
             if '.' in table_name:
                 schema_part, table_part = table_name.split('.', 1)
                 table_name = table_part  # Update table_name to exclude schema
-                if schema_part.lower() != "dbo":
+                if db_type == "SQL_SERVER" and schema_part.lower() != "dbo":
                     schemas_to_create.add(schema_part)
-            # Check for separate Table Schema column if available
-            elif has_table_schema_column and pd.notna(row["Table Schema"]):
-                schema_part = normalize_name(row["Table Schema"])
-                if schema_part.lower() != "dbo" and schema_part:
-                    schemas_to_create.add(schema_part)
+            else:
+                # Use default schema if not specified and no dot in table name
+                if db_type == "SQL_SERVER":
+                    schema_part = "dbo"
         
-        # Store schema for SQL Server
-        if db_type == "SQL_SERVER":
-            # Store the schema with the table_name as a key for later use
-            if not table_name in table_info:
-                table_info[table_name] = {
-                    'columns': [], 
-                    'primary_keys': [],
-                    'schema': schema_part
-                }
-            elif 'schema' not in table_info[table_name]:
-                table_info[table_name]['schema'] = schema_part
+        # Store schema for all database types
+        if table_name not in table_info:
+            table_info[table_name] = {
+                'columns': [], 
+                'primary_keys': [],
+                'schema': schema_part
+            }
+        elif 'schema' not in table_info[table_name]:
+            table_info[table_name]['schema'] = schema_part
         
         all_table_names.add(table_name)
         
@@ -246,15 +248,6 @@ def generate_ddl(db_type, excel_file_path):
         is_timestamp = False
         if "Is it the Timestamp attribute?" in row and pd.notna(row["Is it the Timestamp attribute?"]):
             is_timestamp = str(row["Is it the Timestamp attribute?"]).strip().upper() == "YES"
-        
-        # Store table info
-        if table_name not in table_info:
-            table_info[table_name] = {
-                'columns': [], 
-                'primary_keys': []
-            }
-            if db_type == "SQL_SERVER":
-                table_info[table_name]['schema'] = schema_part
         
         column_info = {
             'name': column_name,
@@ -356,33 +349,28 @@ def generate_ddl(db_type, excel_file_path):
                 if db_type == "MYSQL":
                     col_def = f"{col['quoted_name']} ENUM('INSERT', 'UPDATE', 'DELETE')"
                 else:
-                    check_column = col['quoted_name']
-                    col_def += f" CHECK ({check_column} IN ('INSERT', 'UPDATE', 'DELETE'))"
+                    if db_type == "ORACLE":
+                        # Oracle syntax for CHECK constraint
+                        check_column = col['quoted_name']
+                        col_def += f" CHECK ({check_column} IN ('I', 'U', 'D'))"
+                    else:
+                        check_column = col['quoted_name']
+                        col_def += f" CHECK ({check_column} IN ('INSERT', 'UPDATE', 'DELETE'))"
                 
             if col['is_timestamp']:
-                if db_type in ["MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER"]:
+                if db_type == "ORACLE":
+                    col_def += " DEFAULT SYSTIMESTAMP"  # Correct for Oracle
+                elif db_type in ["MYSQL", "POSTGRESQL", "SQL_SERVER"]:
                     col_def += " DEFAULT CURRENT_TIMESTAMP"
                 
             column_defs.append(col_def)
         
         quoted_table_name = format_identifier(table_name, db_type)
+        schema_part = info.get('schema', default_schema_name)
+        quoted_schema = format_identifier(schema_part, db_type)
         
-        # ORACLE: Include schema name as requested
-        if db_type == "ORACLE":
-            quoted_schema = format_identifier(schema_name, db_type)
-            table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
-        
-        # SQL Server: Use schema from Table Schema column if available
-        elif db_type == "SQL_SERVER":
-            schema_part = info.get('schema', 'dbo')
-            full_table_name = f"{schema_part}.{table_name}"
-            table_ddl = f'CREATE TABLE {full_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
-        
-        # Other databases
-        else:
-            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
-            table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
-        
+        # Use schema from Table Schema column for all database types
+        table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         table_ddl_statements.append(table_ddl)
     
     # Generate PRIMARY KEY constraints
@@ -392,24 +380,12 @@ def generate_ddl(db_type, excel_file_path):
             pk_name = f"PK_{table_name[:20]}"  # Shortened name
             pk_columns = ", ".join(info["primary_keys"])
             
-            # ORACLE: Include schema name as requested
-            if db_type == "ORACLE":
-                quoted_table_name = format_identifier(table_name, db_type)
-                quoted_schema = format_identifier(schema_name, db_type)
-                pk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+            quoted_table_name = format_identifier(table_name, db_type)
+            schema_part = info.get('schema', default_schema_name)
+            quoted_schema = format_identifier(schema_part, db_type)
             
-            # SQL Server: Use schema from Table Schema column
-            elif db_type == "SQL_SERVER":
-                schema_part = info.get('schema', 'dbo')
-                full_table_name = f"{schema_part}.{table_name}"
-                pk_stmt = f'ALTER TABLE {full_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
-            
-            # Other databases
-            else:
-                quoted_table_name = format_identifier(table_name, db_type)
-                quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
-                pk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
-            
+            # Use schema from Table Schema column for all database types
+            pk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
             pk_statements.append(pk_stmt)
     
     # Generate FOREIGN KEY constraints with short names
@@ -438,28 +414,17 @@ def generate_ddl(db_type, excel_file_path):
         fk_name = f"FK_{fk_counter}"
         fk_counter += 1
         
-        # ORACLE: Include schema name as requested
-        if db_type == "ORACLE":
-            quoted_source_table = format_identifier(source_table, db_type)
-            quoted_target_table = format_identifier(target_table, db_type)
-            quoted_schema = format_identifier(schema_name, db_type)
-            fk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_schema}.{quoted_target_table}({quoted_target_column});'
+        quoted_source_table = format_identifier(source_table, db_type)
+        quoted_target_table = format_identifier(target_table, db_type)
         
-        # SQL Server: Use schema from Table Schema column
-        elif db_type == "SQL_SERVER":
-            source_schema = table_info[source_table].get('schema', 'dbo')
-            target_schema = table_info[target_table].get('schema', 'dbo')
-            source_table_full = f"{source_schema}.{source_table}"
-            target_table_full = f"{target_schema}.{target_table}"
-            fk_stmt = f'ALTER TABLE {source_table_full} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {target_table_full}({quoted_target_column});'
+        source_schema = table_info[source_table].get('schema', default_schema_name)
+        target_schema = table_info[target_table].get('schema', default_schema_name)
         
-        # Other databases
-        else:
-            quoted_source_table = format_identifier(source_table, db_type)
-            quoted_target_table = format_identifier(target_table, db_type)
-            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
-            fk_stmt = f'ALTER TABLE {quoted_schema}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_schema}.{quoted_target_table}({quoted_target_column});'
+        quoted_source_schema = format_identifier(source_schema, db_type)
+        quoted_target_schema = format_identifier(target_schema, db_type)
         
+        # Use schema from Table Schema column for all database types
+        fk_stmt = f'ALTER TABLE {quoted_source_schema}.{quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_target_schema}.{quoted_target_table}({quoted_target_column});'
         fk_statements.append(fk_stmt)
     
     # Combine all statements
