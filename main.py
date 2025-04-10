@@ -140,6 +140,22 @@ def normalize_name(name):
         return name
     return name
 
+def fix_oracle_data_type(data_type):
+    """Fixes Oracle data type formatting issues"""
+    if not data_type:
+        return data_type
+        
+    # Format with space after type name: "VARCHAR2(255)" -> "VARCHAR2 (255)"
+    data_type = re.sub(r'(\w+)\(', r'\1 (', data_type)
+    
+    # Fix CHAR specification for consistency
+    data_type = re.sub(r'CHAR\s*\((\d+) CHAR\)', r'CHAR (\1)', data_type, flags=re.IGNORECASE)
+    
+    # Handle VARCHAR2/NVARCHAR2 with CHAR specification
+    data_type = re.sub(r'(N?VARCHAR2)\s*\((\d+) CHAR\)', r'\1 (\2)', data_type, flags=re.IGNORECASE)
+    
+    return data_type
+
 def generate_ddl(db_type, excel_file_path):
     # Read Excel file
     try:
@@ -232,6 +248,11 @@ def generate_ddl(db_type, excel_file_path):
             data_type = str(row["Data Type and Length"]).strip()
         
         mapped_data_type = map_data_type(db_type, data_type)
+        
+        # Fix Oracle data type formatting
+        if db_type == "ORACLE":
+            mapped_data_type = fix_oracle_data_type(mapped_data_type)
+        
         quoted_column_name = format_identifier(column_name, db_type)
         
         # Check constraints
@@ -356,30 +377,71 @@ def generate_ddl(db_type, excel_file_path):
                 if db_type == "MYSQL":
                     col_def = f"{col['quoted_name']} ENUM('INSERT', 'UPDATE', 'DELETE')"
                 else:
-                    check_column = col['quoted_name']
-                    col_def += f" CHECK ({check_column} IN ('INSERT', 'UPDATE', 'DELETE'))"
+                    if db_type == "ORACLE":
+                        # Oracle syntax for CHECK constraint with unquoted column name
+                        check_column = col['name']  # Use unquoted name for Oracle
+                        col_def += f" CHECK ({check_column} IN ('I', 'U', 'D'))"
+                    else:
+                        check_column = col['quoted_name']
+                        col_def += f" CHECK ({check_column} IN ('INSERT', 'UPDATE', 'DELETE'))"
                 
             if col['is_timestamp']:
-                if db_type in ["MYSQL", "POSTGRESQL", "ORACLE", "SQL_SERVER"]:
+                if db_type in ["MYSQL", "POSTGRESQL", "SQL_SERVER"]:
                     col_def += " DEFAULT CURRENT_TIMESTAMP"
+                elif db_type == "ORACLE":
+                    col_def += " DEFAULT SYSTIMESTAMP"
                 
             column_defs.append(col_def)
         
-        quoted_table_name = format_identifier(table_name, db_type)
-        
         # ORACLE: Remove schema prefix as requested
         if db_type == "ORACLE":
-            table_ddl = f'CREATE TABLE {quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
+            # Format like your example, removing quotes from most identifiers
+            column_defs_oracle = []
+            for col in info['columns']:
+                col_name = col['name']
+                col_type = col['data_type']
+                
+                # Check if this is a primary key column
+                is_pk = col['is_primary_key']
+                
+                # Format the column definition
+                col_def = f"{col_name} {col_type}"
+                
+                # Add NOT NULL constraint if applicable
+                if col['not_null']:
+                    col_def += " NOT NULL"
+                    
+                # Add PRIMARY KEY directly if this is the only primary key
+                if is_pk and len(info['primary_keys']) == 1:
+                    col_def += " PRIMARY KEY"
+                    # Flag that we've handled this primary key
+                    info['primary_key_handled'] = True
+                    
+                # Add LastOperation check constraint
+                if col['is_last_operation']:
+                    col_def += f" CHECK ({col_name} IN ('I', 'U', 'D'))"
+                
+                # Add timestamp default
+                if col['is_timestamp']:
+                    col_def += " DEFAULT SYSTIMESTAMP"
+                
+                column_defs_oracle.append(col_def)
+            
+            # Create the table DDL
+            table_ddl = f'CREATE TABLE {table_name}\n(\n' + ",\n".join(column_defs_oracle) + "\n);"
         
         # SQL Server: Use schema from Table Schema column if available
         elif db_type == "SQL_SERVER":
             schema_part = info.get('schema', 'dbo')
-            full_table_name = f"{schema_part}.{table_name}"
+            quoted_table_name = format_identifier(table_name, db_type)
+            # Format like: dbo.[TABLE_NAME]
+            full_table_name = f"{schema_part}.{quoted_table_name}"
             table_ddl = f'CREATE TABLE {full_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         
         # Other databases
         else:
-            quoted_schema = format_identifier(schema_name, db_type)
+            quoted_table_name = format_identifier(table_name, db_type)
+            quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
             table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         
         table_ddl_statements.append(table_ddl)
@@ -387,19 +449,25 @@ def generate_ddl(db_type, excel_file_path):
     # Generate PRIMARY KEY constraints
     pk_statements = []
     for table_name, info in table_info.items():
+        # Skip if primary key was already handled in the CREATE TABLE (Oracle only)
+        if db_type == "ORACLE" and info.get('primary_key_handled', False):
+            continue
+            
         if info['primary_keys']:
             pk_name = f"PK_{table_name[:20]}"  # Shortened name
             pk_columns = ", ".join(info["primary_keys"])
             
             # ORACLE: Remove schema prefix
             if db_type == "ORACLE":
-                quoted_table_name = format_identifier(table_name, db_type)
-                pk_stmt = f'ALTER TABLE {quoted_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
+                # No quotes around table name for oracle in this case
+                pk_stmt = f'ALTER TABLE {table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
             
             # SQL Server: Use schema from Table Schema column
             elif db_type == "SQL_SERVER":
                 schema_part = info.get('schema', 'dbo')
-                full_table_name = f"{schema_part}.{table_name}"
+                quoted_table_name = format_identifier(table_name, db_type)
+                # Format like: dbo.[TABLE_NAME]
+                full_table_name = f"{schema_part}.{quoted_table_name}"
                 pk_stmt = f'ALTER TABLE {full_table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({pk_columns});'
             
             # Other databases
@@ -438,16 +506,16 @@ def generate_ddl(db_type, excel_file_path):
         
         # ORACLE: Remove schema prefix
         if db_type == "ORACLE":
-            quoted_source_table = format_identifier(source_table, db_type)
-            quoted_target_table = format_identifier(target_table, db_type)
-            fk_stmt = f'ALTER TABLE {quoted_source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {quoted_target_table}({quoted_target_column});'
+            fk_stmt = f'ALTER TABLE {source_table} ADD CONSTRAINT {fk_name} FOREIGN KEY ({source_column}) REFERENCES {target_table}({target_column});'
         
         # SQL Server: Use schema from Table Schema column
         elif db_type == "SQL_SERVER":
             source_schema = table_info[source_table].get('schema', 'dbo')
             target_schema = table_info[target_table].get('schema', 'dbo')
-            source_table_full = f"{source_schema}.{source_table}"
-            target_table_full = f"{target_schema}.{target_table}"
+            quoted_source_table = format_identifier(source_table, db_type)
+            quoted_target_table = format_identifier(target_table, db_type)
+            source_table_full = f"{source_schema}.{quoted_source_table}"
+            target_table_full = f"{target_schema}.{quoted_target_table}"
             fk_stmt = f'ALTER TABLE {source_table_full} ADD CONSTRAINT {fk_name} FOREIGN KEY ({quoted_source_column}) REFERENCES {target_table_full}({quoted_target_column});'
         
         # Other databases
