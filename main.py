@@ -323,13 +323,8 @@ def generate_ddl(db_type, excel_file_path):
         for schema in sorted(oracle_schemas_to_create):
             if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', schema):  # Validate schema name
                 schema_ddls.append(
-                    f"-- Drop user if exists\n"
-                    f"BEGIN\n"
-                    f"  FOR c IN (SELECT username FROM dba_users WHERE username = '{schema.upper()}') LOOP\n"
-                    f"    EXECUTE IMMEDIATE 'DROP USER {schema} CASCADE';\n"
-                    f"  END LOOP;\n"
-                    f"END;\n"
-                    f"/\n\n"
+                    f"-- Drop and recreate user\n"
+                    f"DROP USER {schema} CASCADE;\n\n"
                     f"CREATE USER \"{schema}\" IDENTIFIED BY 123456;\n"
                     f"GRANT CREATE SESSION, CONNECT, DBA, RESOURCE TO \"{schema}\";"
                 )
@@ -338,12 +333,7 @@ def generate_ddl(db_type, excel_file_path):
     elif db_type == "ORACLE":
         ddl_statements.append(
             f"-- Default schema creation (commented)\n"
-            f"-- BEGIN\n"
-            f"--   FOR c IN (SELECT username FROM dba_users WHERE username = '{default_schema_name.upper()}') LOOP\n"
-            f"--     EXECUTE IMMEDIATE 'DROP USER {default_schema_name} CASCADE';\n"
-            f"--   END LOOP;\n"
-            f"-- END;\n"
-            f"-- /\n\n"
+            f"-- DROP USER {default_schema_name} CASCADE;\n"
             f"-- CREATE USER \"{default_schema_name}\" IDENTIFIED BY 123456;\n"
             f"-- GRANT CREATE SESSION, CONNECT, DBA, RESOURCE TO \"{default_schema_name}\";\n"
         )
