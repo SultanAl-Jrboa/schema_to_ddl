@@ -134,7 +134,10 @@ def format_identifier(name, db_type):
 def normalize_name(name):
     """Normalize table and column names"""
     if name:
-        return str(name).strip()
+        name = str(name).strip()
+        # Remove any extra quotes or brackets
+        name = re.sub(r'^[`"\[\]]+|[`"\[\]]+$', '', name)
+        return name
     return name
 
 def generate_ddl(db_type, excel_file_path):
@@ -191,10 +194,17 @@ def generate_ddl(db_type, excel_file_path):
                 continue
         
         # Handle SQL Server schemas
-        if db_type == "SQL_SERVER" and '.' in table_name:
-            schema_part = table_name.split('.')[0]
-            if schema_part.lower() != "dbo":
-                schemas_to_create.add(schema_part)
+        if db_type == "SQL_SERVER":
+            # Check for schema in table name (schema.table)
+            if '.' in table_name:
+                schema_part = table_name.split('.')[0]
+                if schema_part.lower() != "dbo":
+                    schemas_to_create.add(schema_part)
+            # Check for separate Schema column if available
+            elif "Schema" in row and pd.notna(row["Schema"]):
+                schema_part = normalize_name(row["Schema"])
+                if schema_part.lower() != "dbo":
+                    schemas_to_create.add(schema_part)
         
         all_table_names.add(table_name)
         
@@ -298,21 +308,19 @@ def generate_ddl(db_type, excel_file_path):
     
     # Add schema creation for SQL Server
     if db_type == "SQL_SERVER" and schemas_to_create:
-        schema_ddls = []
+        schema_ddls = ["\n-- Create non-dbo schemas"]
         for schema in sorted(schemas_to_create):
-            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', schema):
+            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', schema):  # Validate schema name
                 schema_ddls.append(
                     f"IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '{schema}')\n"
                     f"BEGIN\n"
                     f"    EXEC('CREATE SCHEMA {schema}')\n"
-                    f"END"
+                    f"END;"
                 )
-        if schema_ddls:
-            ddl_statements.append("\n-- Create non-dbo schemas\n" + "\n\n".join(schema_ddls) + "\n")
+        ddl_statements.extend(schema_ddls)
 
-    # Generate CREATE TABLE statements
+    # Generate CREATE TABLE statements with proper schema handling
     table_ddl_statements = []
-    
     for table_name, info in table_info.items():
         column_defs = []
         
@@ -335,20 +343,34 @@ def generate_ddl(db_type, excel_file_path):
                 
             column_defs.append(col_def)
         
-        # Handle table naming with schemas
+        # Handle SQL Server schema formatting
         if db_type == "SQL_SERVER":
+            # Determine schema from table name or default to dbo
             if '.' in table_name:
                 schema_part, table_part = table_name.split('.', 1)
                 full_table_name = f"{schema_part}.{table_part}"
+            elif "Schema" in df_metadata.columns:
+                # Try to get schema from Schema column if exists
+                schema_values = df_metadata[df_metadata["Table Name"] == table_name]["Schema"]
+                if not schema_values.empty:
+                    schema_part = normalize_name(schema_values.iloc[0])
+                    if pd.notna(schema_part) and schema_part.lower() != "dbo":
+                        full_table_name = f"{schema_part}.{table_name}"
+                    else:
+                        full_table_name = f"dbo.{table_name}"
+                else:
+                    full_table_name = f"dbo.{table_name}"
             else:
                 full_table_name = f"dbo.{table_name}"
+                
             quoted_table_name = format_identifier(table_part if '.' in table_name else table_name, db_type)
             table_ddl = f'CREATE TABLE {full_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
         else:
+            # Original handling for other databases
             quoted_table_name = format_identifier(table_name, db_type)
             quoted_schema = format_identifier(schema_name, db_type) if db_type == "POSTGRESQL" else schema_name
             table_ddl = f'CREATE TABLE {quoted_schema}.{quoted_table_name} (\n    ' + ",\n    ".join(column_defs) + "\n);"
-            
+        
         table_ddl_statements.append(table_ddl)
     
     # Generate PRIMARY KEY constraints
