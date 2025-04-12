@@ -1,5 +1,5 @@
 # Schema-To-DDL
-![Schema to DDL Flow](./images/schema for DDL Tool.png)
+![Schema to DDL Flow](./images/schema.png)
 ## Overview
 Schema-To-DDL is a web-based tool that generates DDL (Data Definition Language) scripts for creating database schemas from provided metadata files, such as Excel. It supports multiple database systems, including:
 
