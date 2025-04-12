@@ -56,13 +56,18 @@ The application is deployed on Render. To deploy manually:
 ## Folder Structure
 ```
 /schema-to-ddl
-│── app.py               # Main Flask application
+│── app.py                   # Main Flask application
 │── templates/
-│   └── index.html       # Frontend template
-│── uploads/             # Directory for uploaded files
-│── outputs/             # Directory for generated DDL scripts
-│── requirements.txt     # Dependencies
-│── README.md            # Project documentation
+│   └── index.html           # Frontend template
+│── static/
+│   └── images/
+│       ├── schema.png       # Image used for documentation or UI
+│       └── sdaia.png        # SDAIA Logo image
+│── uploads/                 # Directory for uploaded files
+│── outputs/                 # Directory for generated DDL scripts
+│── requirements.txt         # Dependencies
+│── README.md                # Project documentation
+
 ```
 
 ## Contributing
